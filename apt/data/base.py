@@ -6,12 +6,14 @@ import numpy as np
 import torch
 from torch import nn
 
+from .utils import sample_trunc_gamma_int
+
 
 class BaseGenerator(nn.Module):
     def __init__(self, batch_size, num_steps, data_size=1000,
                  num_datasets=8, num_trained_datasets=2,
                  eval_data_size=5000, static_eval_data=True,
-                 feature_size_min=1, feature_size_max=100,
+                 feature_size_k=5, feature_size_mu=100,
                  split_min=0.1, split_max=0.9):
         super().__init__()
         assert batch_size % num_datasets == 0
@@ -24,16 +26,17 @@ class BaseGenerator(nn.Module):
         self.eval_data_size = eval_data_size
         self.static_eval_data = static_eval_data
 
-        self.feature_size_min = feature_size_min
-        self.feature_size_max = feature_size_max + 1
+        self.feature_size_k = feature_size_k
+        self.feature_size_mu = feature_size_mu
         self.split_min = split_min
         self.split_max = split_max
 
         self.eval_data = None
         self.num_iters = nn.Parameter(torch.zeros(1, dtype=torch.long), requires_grad=False)
 
-    def sample_feature_size(self, size=None):
-        return np.random.randint(self.feature_size_min, self.feature_size_max, size=size)
+    def sample_feature_size(self, shift=1, high=300):
+        #TODO: size
+        return sample_trunc_gamma_int(self.feature_size_k, self.feature_size_mu, shift=shift, high=high)
 
     def sample_split(self, size=None):
         return np.random.uniform(self.split_min, self.split_max, size=size)

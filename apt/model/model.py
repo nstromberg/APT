@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .transformer import TransformerBlock, MixtureBlock
+from .transformer import TransformerBlock, PatchEmbedding, MixtureBlock
 from .feedforward import FeedForward
 from .utils import get_args, scatter_sum, auc_metric
 
@@ -13,19 +13,18 @@ from sklearn.metrics import (
 
 
 class APT(nn.Module):
-    def __init__(self, n_blocks, d_features, d_model=512, d_ff=2048, n_heads=4,
+    def __init__(self, n_blocks, d_patch=100, d_model=512, d_ff=2048, n_heads=4,
                  dropout=0.1, activation="gelu", norm_eps=1e-5, classification=True):
         super().__init__()
         # TODO: feed normalized dataset in training, normalize dataset in inference
         # TODO: is the original zero initialization for transformer necessary?
         # TODO: dropout for context aggregation?
         self.init_args = get_args(vars())
-        self.d_features = d_features
         self.classification = classification
 
-        self._emb_x = FeedForward(
-            d_model, in_dim=d_features, out_dim=d_model,
-            activation=activation, bias=True
+        self._emb_x = PatchEmbedding(
+            patch_size=d_patch, d_model=d_model, n_heads=n_heads, d_ff=d_ff,
+            dropout=0.0, activation=activation, norm_eps=norm_eps
         )
         self._emb_y = FeedForward(
             d_model, in_dim=1, out_dim=d_model,
@@ -73,9 +72,9 @@ class APT(nn.Module):
 
     def loss(self, x, y, split=None, train_size=0.95):
         """
-        x: (batch_size, data_size, sequence_length)
+        x: (batch_size, data_size, feature_size)
         y: (batch_size, data_size)
-        mask: (batch_size, data_size, sequence_length)
+        mask: (batch_size, data_size, feature_size)
         """
         if split is None:
             split = int(x.shape[1]*train_size)
@@ -142,14 +141,14 @@ class APT(nn.Module):
     @torch.no_grad()
     def predict_helper(self, x_train, y_train, x_test, batch_size=3000, dim_size=None):
         """
-        x_train: (train_size, sequence_length)
+        x_train: (train_size, feature_size)
         y_train: (train_size,)
-        x_test: (test_size, sequence_length)
+        x_test: (test_size, feature_size)
         """
         device = next(self.parameters()).device
 
         train_size = min(batch_size, y_train.shape[0])
-        x = torch.cat((x_train[:train_size, :], x_test), dim=-2)[:, :self.d_features]
+        x = torch.cat((x_train[:train_size, :], x_test), dim=-2)
         y_train = y_train[:train_size]
         if self.classification:
             y_train = y_train.to(torch.long)
@@ -165,9 +164,9 @@ class APT(nn.Module):
     @torch.no_grad()
     def evaluate_helper(self, x_train, y_train, x_test, y_test, batch_size=3000, metric=None):
         """
-        x_train: (train_size, sequence_length)
+        x_train: (train_size, feature_size)
         y_train: (train_size)
-        x_test: (test_size, sequence_length)
+        x_test: (test_size, feature_size)
         y_test: (test_size,)
         """
         device = next(self.parameters()).device
@@ -221,9 +220,9 @@ class APT(nn.Module):
     @torch.no_grad()
     def fit(self, x_train, y_train, val_size=0.2, tune=True, metric=None, n_perms=32, batch_size=3000):
         """
-        x_train: (train_size, sequence_length)
+        x_train: (train_size, feature_size)
         y_train: (train_size)
-        x_test: (test_size, sequence_length)
+        x_test: (test_size, feature_size)
         y_test: (test_size,)
         """
         self.x_train = x_train

@@ -27,8 +27,6 @@ def parse_arguments():
 
     # data arguments
     parser.add_argument("--data_size", type=int, default=1000)
-    parser.add_argument("--max_feature_size", type=int, default=100)
-    parser.add_argument("--max_class_size", type=int, default=10)
     parser.add_argument("--reset_freq", type=int, default=5)
     parser.add_argument("--num_datasets", type=int, default=8)
     parser.add_argument("--num_trained_datasets", type=int, default=2)

@@ -21,8 +21,8 @@ def prepare(args, device):
     # model
     if args.state_dict is None:
         model = APT(classification=args.classification,
-            n_blocks=args.n_blocks, d_features=args.max_feature_size,
-            d_model=args.d_model, d_ff=args.d_ff, n_heads=args.n_heads
+            n_blocks=args.n_blocks, d_model=args.d_model,
+            d_ff=args.d_ff, n_heads=args.n_heads
         )
     else:
         state_dict, init_args = torch.load(args.state_dict, map_location='cpu')
@@ -37,7 +37,6 @@ def prepare(args, device):
         num_steps=args.steps_per_epoch*args.aggregate_k_gradients,
         data_size=args.data_size, num_datasets=args.num_datasets,
         num_trained_datasets=args.num_trained_datasets,
-        feature_size_max=args.max_feature_size,
         device=device
     )
     if args.eval_data is not None:

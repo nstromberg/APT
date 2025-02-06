@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from .attention import FullAttention
 from .feedforward import FeedForward
+from .convolution import Conv1d
 
 
 class TransformerBlock(nn.Module):
@@ -27,6 +28,53 @@ class TransformerBlock(nn.Module):
         x = x + self._ff(x)
         x = self._ln_ff(x)
 
+        return x
+
+
+class PatchEmbedding(nn.Module):
+    def __init__(self, patch_size=128, d_model=512, n_heads=4, d_ff=2048,
+                 dropout=0.0, activation="gelu", norm_eps=1e-5):
+        super().__init__()
+        self.patch_size = patch_size
+
+        if activation == "relu":
+            act = nn.ReLU
+        elif activation == "silu":
+            act = nn.SiLU
+        elif activation == "gelu":
+            act = nn.GELU
+        elif activation == "tanh":
+            act = nn.Tanh
+        elif activation == "sigmoid":
+            act = nn.Sigmoid
+        else:
+            act = activation
+
+        self._patchify = nn.Sequential(
+            Conv1d(1, d_model, kernel_size=patch_size, stride=patch_size, padding=0),
+            act(),
+            nn.Conv1d(d_model, d_model, kernel_size=1, stride=1, padding=0)
+        )
+
+        self._emb = TransformerBlock(
+            d_model=d_model, n_heads=n_heads, d_ff=d_ff,
+            dropout=dropout, activation=activation, norm_eps=norm_eps
+        )
+
+        self._ln = nn.LayerNorm(d_model, eps=norm_eps)
+
+    def forward(self, x):
+        """
+        x: (batch_size, sequence_length, feature_size)
+        """
+        _, l, f = x.size()
+        x = self._patchify(x.view(-1, 1, f))
+
+        _, d, p = x.size()
+        x = x.view(-1, l, d, p).transpose(-1, -2)
+        x = self._emb(x)
+
+        x = self._ln(x.sum(-2))
         return x
 
 

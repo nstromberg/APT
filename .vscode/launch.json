@@ -31,7 +31,7 @@
                 "--steps_per_epoch", "12",
                 "--max_epochs", "4",
                 "--data_lr", "0.1",
-                "--eval_data", "electricity.pt,nomao.pt",
+                "--eval_data", "mfeat-fourier.pt,breast-w.pt,mfeat-karhunen.pt,mfeat-morphological.pt,mfeat-zernike.pt,cmc.pt,credit-approval.pt,credit-g.pt,diabetes.pt,tic-tac-toe.pt,vehicle.pt,eucalyptus.pt,analcatdata_authorship.pt,pc4.pt,pc3.pt,kc2.pt,blood-transfusion-service-center.pt,cnae-9.pt,ilpd.pt,wdbc.pt,dresses-sales.pt,MiceProtein.pt,steel-plates-fault.pt,climate-model-simulation-crashes.pt,balance-scale.pt,mfeat-factors.pt,vowel.pt,analcatdata_dmft.pt,pc1.pt,banknote-authentication.pt,qsar-biodeg.pt,semeion.pt,cylinder-bands.pt,car.pt,mfeat-pixel.pt",
                 "--classification",
                 "--initial_eval",
             ],
