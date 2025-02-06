@@ -13,7 +13,7 @@ class Linear(nn.Linear):
         if mask is not None:
             x = x.masked_fill(mask==0, 0.0)
         if self.replace_nan_by_zero:
-            x = torch.nan_to_num(x, nan=0.0)
+            x = x.masked_fill(torch.isnan(x), 0.0)
         if self.pad_to_dim:
             x = F.pad(x, (0, self.in_features - x.shape[-1]), "constant", 0.0)
         return super().forward(x)

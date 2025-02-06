@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .attention import FullAttention
 from .feedforward import FeedForward
@@ -27,3 +28,50 @@ class TransformerBlock(nn.Module):
         x = self._ln_ff(x)
 
         return x
+
+
+class MixtureBlock(nn.Module):
+    """A Mixture block."""
+
+    def __init__(self, d_model=512, n_heads=4, d_ff=2048,
+                 dropout=0.1, activation="gelu", temperature=0.2):
+        """Initializes a new MixtureBlock instance.
+        """
+        super().__init__()
+        self.n_heads = n_heads
+        self.dropout = dropout
+        self.d_head = d_model // n_heads
+        self.scale = self.d_head ** -0.5
+
+        self._attn_logits = FeedForward(d_ff, in_dim=d_model, out_dim=d_model,
+            n_hid=1, activation=activation)
+
+        self._attn_gates = FeedForward(d_ff, in_dim=d_model, out_dim=d_model,
+            n_hid=1, activation=activation)
+
+        self.temperature = temperature
+
+    def forward(self, hidden, split):
+        """
+        x: (batch_size, data_size, hidden_size)
+        """
+        b, l, _ = hidden.size()
+
+        attn_gates = self._attn_gates(hidden)
+        attn_gates = attn_gates.view(b, l, self.n_heads, -1).transpose(-3, -2)
+        k_gates, q_gates = attn_gates[..., :split, :], attn_gates[..., split:, :]
+        k_gates, q_gates = F.normalize(k_gates, dim=-1), F.normalize(q_gates, dim=-1)
+        gates = torch.einsum(f"...ld, ...md -> ...lm", q_gates, k_gates)
+        gates = torch.distributions.RelaxedBernoulli(
+            self.temperature, logits=gates).rsample()
+
+        attn_logits = self._attn_logits(hidden)
+        attn_logits = attn_logits.view(b, l, self.n_heads, -1).transpose(-3, -2)
+        k_logits, q_logits = attn_logits[..., :split, :], attn_logits[..., split:, :]
+        logits = torch.einsum(f"...ld, ...md -> ...lm", q_logits, k_logits)
+        probs = (logits * self.scale).softmax(dim=-1)
+        probs = probs * gates
+        probs = probs / probs.sum(-1, keepdim=True)
+
+        probs = probs.mean(-3)
+        return probs

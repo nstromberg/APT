@@ -20,7 +20,7 @@ def prepare(args, device):
 
     # model
     if args.state_dict is None:
-        model = APT(classification=args.classification, n_classes=args.max_class_size,
+        model = APT(classification=args.classification,
             n_blocks=args.n_blocks, d_features=args.max_feature_size,
             d_model=args.d_model, d_ff=args.d_ff, n_heads=args.n_heads
         )
@@ -38,7 +38,6 @@ def prepare(args, device):
         data_size=args.data_size, num_datasets=args.num_datasets,
         num_trained_datasets=args.num_trained_datasets,
         feature_size_max=args.max_feature_size,
-        class_size_max=args.max_class_size,
         device=device
     )
     if args.eval_data is not None:

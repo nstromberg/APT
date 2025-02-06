@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .transformer import TransformerBlock
+from .transformer import TransformerBlock, MixtureBlock
 from .feedforward import FeedForward
-from .utils import get_args, auc_metric
+from .utils import get_args, scatter_sum, auc_metric
 
 from sklearn.metrics import (
     accuracy_score, balanced_accuracy_score, log_loss,
@@ -14,7 +14,7 @@ from sklearn.metrics import (
 
 class APT(nn.Module):
     def __init__(self, n_blocks, d_features, d_model=512, d_ff=2048, n_heads=4,
-                 dropout=0.1, activation="gelu", norm_eps=1e-5, classification=True, n_classes=10):
+                 dropout=0.1, activation="gelu", norm_eps=1e-5, classification=True):
         super().__init__()
         # TODO: feed normalized dataset in training, normalize dataset in inference
         # TODO: is the original zero initialization for transformer necessary?
@@ -22,12 +22,15 @@ class APT(nn.Module):
         self.init_args = get_args(vars())
         self.d_features = d_features
         self.classification = classification
-        self.n_classes = n_classes
 
-        self._emb_x = FeedForward(d_model, in_dim=d_features, out_dim=d_model,
-            activation=activation, bias=True)
-        self._emb_y = FeedForward(d_model, in_dim=1, out_dim=d_model,
-            activation=activation, bias=True)
+        self._emb_x = FeedForward(
+            d_model, in_dim=d_features, out_dim=d_model,
+            activation=activation, bias=True
+        )
+        self._emb_y = FeedForward(
+            d_model, in_dim=1, out_dim=d_model,
+            activation=activation, bias=True
+        )
 
         self._transformer = nn.ModuleList(
             [TransformerBlock(
@@ -36,17 +39,25 @@ class APT(nn.Module):
             ) for _ in range(n_blocks)]
         )
 
-        out_dim = n_classes if classification else 2
-        self._out = FeedForward(d_model, out_dim=out_dim, activation=activation)
+        if classification:
+            self._out = MixtureBlock(
+                d_model, n_heads=n_heads, d_ff=d_ff,
+                dropout=dropout, activation=activation, temperature=0.2
+            )
+        else:
+            self._out = FeedForward(
+                d_model, in_dim=d_model, out_dim=2,
+                activation=activation, bias=True
+            )
 
         self.x_train = None
         self.y_train = None
         self.feature_perm = None
 
-    def forward(self, x, y_train, mask=None):
+    def forward(self, x, y_train):
         split = y_train.shape[1]
 
-        x = self._emb_x(x, mask=mask) # (batch_size, data_size, d_model)
+        x = self._emb_x(x) # (batch_size, data_size, d_model)
         x_train, x_test = x[:, :split, ...], x[:, split:, ...] # (batch_size, n_train, d_model), (batch_size, n_test, d_model)
         y_train = self._emb_y(y_train.to(x.dtype).unsqueeze(-1)) # (batch_size, n_train, d_model)
 
@@ -56,13 +67,11 @@ class APT(nn.Module):
         for _, block in enumerate(self._transformer):
             hidden = block(hidden, mask=mask) # (batch_size, data_size, d_model)
 
-        h_test = hidden[:, split:, ...] # (batch_size, n_test, d_model)
+        if self.classification:
+            return self._out(hidden, split)
+        return self._out(hidden[:, split:, ...])
 
-        y_pred = self._out(h_test).squeeze(-1) # (batch_size, n_test)
-
-        return y_pred
-
-    def loss(self, x, y, split=None, mask=None, train_size=0.95):
+    def loss(self, x, y, split=None, train_size=0.95):
         """
         x: (batch_size, data_size, sequence_length)
         y: (batch_size, data_size)
@@ -73,23 +82,40 @@ class APT(nn.Module):
 
         y_train, y_test = y[:, :split, ...], y[:, split:, ...] # (batch_size, n_train), (batch_size, n_test)
 
-        out = self.forward(x, y_train, mask=mask)
+        out = self.forward(x, y_train)
 
         # prediction loss
         if self.classification:
-            loss = self.classification_loss(out, y_test)
+            loss = self.classification_loss(out, y_train, y_test)
         else:
             loss = self.regression_loss(out, y_test)
         loss_dict = {"Prediction Loss": loss.item()}
 
         return loss, loss_dict
 
-    def classification_loss(self, y_pred, y_test, eps=1e-4):
-        probs = torch.softmax(y_pred, dim=-1)
-        ce = -torch.log(torch.gather(probs, -1, y_test.unsqueeze(-1)) + eps)
+    def classification_loss(self, mixture_probs, y_train, y_test, eps=1e-4):
+        """
+        mixture_probs: (batch_size, test_size, train_size)
+        y_train: (batch_size, train_size)
+        y_test: (batch_size, test_size)
+        """
+        y = torch.cat((y_train, y_test), dim=1)
+
+        offsets = torch.cumsum(y.max(1)[0] + 1, dim=0)[:-1].unsqueeze(-1)
+        y[1:] = y[1:] + offsets
+        y_train, y_test = y[:, :y_train.shape[1]], y[:, -y_test.shape[1]:]
+
+        class_probs = scatter_sum(mixture_probs.transpose(0,1).reshape(mixture_probs.shape[1], -1),
+            y_train.reshape(-1), dim=1, dim_size=y.max()+1
+        )
+        ce = -torch.log(torch.gather(class_probs, 1, y_test.transpose(0,1)) + eps)
         return ce.mean()
 
     def regression_loss(self, y_pred, y_test, eps=1e-6):
+        """
+        y_pred: (batch_size, test_size, 2)
+        y_test: (batch_size, test_size)
+        """
         return F.gaussian_nll_loss(
             y_pred[..., 0], y_test, F.softplus(y_pred[..., 1]), full=True, eps=eps
         )
@@ -114,7 +140,7 @@ class APT(nn.Module):
         return mask
 
     @torch.no_grad()
-    def predict_helper(self, x_train, y_train, x_test, batch_size=3000):
+    def predict_helper(self, x_train, y_train, x_test, batch_size=3000, dim_size=None):
         """
         x_train: (train_size, sequence_length)
         y_train: (train_size,)
@@ -125,28 +151,34 @@ class APT(nn.Module):
         train_size = min(batch_size, y_train.shape[0])
         x = torch.cat((x_train[:train_size, :], x_test), dim=-2)[:, :self.d_features]
         y_train = y_train[:train_size]
+        if self.classification:
+            y_train = y_train.to(torch.long)
 
         x, y_train = map(lambda t: t.to(device), (x, y_train))
         out = self.forward(x.unsqueeze(0), y_train.unsqueeze(0)).squeeze(0)
 
         if self.classification:
-            return torch.softmax(out[:, :(y_train.max() + 1)], dim=-1)
+            return scatter_sum(out, y_train, dim=1,
+                dim_size=(y_train.max().tolist() + 1 if dim_size is None else dim_size))
         return out[..., 0]
 
     @torch.no_grad()
     def evaluate_helper(self, x_train, y_train, x_test, y_test, batch_size=3000, metric=None):
         """
-        x_train: (batch_size, train_size, sequence_length)
-        y_train: (batch_size, train_size)
-        x_test: (batch_size, test_size, sequence_length)
-        y_test: (batch_size, test_size,)
+        x_train: (train_size, sequence_length)
+        y_train: (train_size)
+        x_test: (test_size, sequence_length)
+        y_test: (test_size,)
         """
         device = next(self.parameters()).device
-        y_test = y_test.to(device)
+        if self.classification:
+            y_test = y_test.to(torch.long).to(device)
         target = y_test.cpu().numpy()
 
-        y_pred = self.predict_helper(x_train, y_train, x_test, batch_size=batch_size)
         if self.classification:
+            y_pred = self.predict_helper(x_train, y_train, x_test, batch_size=batch_size,
+                dim_size=(max(y_train.max().tolist(), y_test.max().tolist()) + 1))
+
             proba = y_pred.cpu().numpy()
             pred = torch.argmax(y_pred, dim=-1).cpu().numpy()
             if metric == "acc":
@@ -164,6 +196,8 @@ class APT(nn.Module):
                     "Test CE": log_loss(target, proba),
                     "Test AUC": auc_metric(target, proba),
                 }
+        y_pred = self.predict_helper(x_train, y_train, x_test, batch_size=batch_size)
+
         pred = y_pred.cpu().numpy()
         if metric == "mse":
             return mean_squared_error(target, pred)

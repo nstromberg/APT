@@ -3,7 +3,7 @@ import torch
 def masked_mean(x, mask, dim=None, keepdim=False, return_percentage=False):
     x = x.masked_fill(mask==0, 0)
     mask_sum = mask.sum(dim=dim, keepdim=keepdim)
-    mask_sum[mask_sum==0] = 1.
+    mask_sum = mask_sum.masked_fill(mask_sum==0, 1)
     x_mean = x.sum(dim=dim, keepdim=keepdim) / mask_sum
 
     if return_percentage:
@@ -13,7 +13,7 @@ def masked_mean(x, mask, dim=None, keepdim=False, return_percentage=False):
 def masked_std(x, mask, dim=None, keepdim=False, return_percentage=False, eps=1e-4):
     x = x.masked_fill(mask==0, 0)
     mask_sum = mask.sum(dim=dim, keepdim=True)
-    mask_sum[mask_sum==0] = 1.
+    mask_sum = mask_sum.masked_fill(mask_sum==0, 1)
     x_mean = x.sum(dim=dim, keepdim=True) / mask_sum
 
     x = ((x - x_mean)**2).masked_fill(mask==0, 0)
@@ -57,9 +57,7 @@ def process(xs, ys, dim=1, mask=None, classification=False):
     xs = clip_outliers(xs, dim=dim, mask=mask)
     xs = normalize_data(xs, dim=dim, mask=mask)
 
-    if classification:
-        ys = ys.to(torch.long)
-    else:
+    if not classification:
         ys = clip_outliers(ys, dim=dim)
         ys = normalize_data(ys, dim=dim)
 
