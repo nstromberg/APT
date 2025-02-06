@@ -66,9 +66,9 @@ def process(xs, ys, dim=1, mask=None, classification=False):
 def process_data(data, classification=False):
     x_train, y_train, x_test, y_test = data
     """
-    x_train: (train_size, sequence_length)
+    x_train: (train_size, feature_size)
     y_train: (train_size,)
-    x_test: (test_size, sequence_length)
+    x_test: (test_size, feature_size)
     y_test: (test_size,)
     """
     n_test = x_test.shape[0]

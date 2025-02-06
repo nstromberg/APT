@@ -225,6 +225,8 @@ class APT(nn.Module):
         x_test: (test_size, feature_size)
         y_test: (test_size,)
         """
+        x_train = torch.as_tensor(x_train)
+        y_train = torch.as_tensor(y_train)
         self.x_train = x_train
         self.y_train = y_train
 
@@ -262,18 +264,22 @@ class APT(nn.Module):
 
         return self
 
-    def get_data(self, x_test):
+    def get_data(self, x_test, y_test=None):
         x_train = self.x_train
         y_train = self.y_train
         if self.feature_perm is not None:
             x_train = x_train[:, self.feature_perm]
             x_test = x_test[:, self.feature_perm]
 
+        x_test = torch.as_tensor(x_test)
+        if y_test is not None:
+            y_test = torch.as_tensor(y_test)
+            return x_train, y_train, x_test, y_test
         return x_train, y_train, x_test
 
     def evaluate(self, x_test, y_test, batch_size=3000, metric=None):
         return self.evaluate_helper(
-            *self.get_data(x_test), y_test,
+            *self.get_data(x_test, y_test),
             batch_size=batch_size, metric=metric
         )
 

@@ -139,6 +139,7 @@ def train(args):
         # reporting
         print('-' * 89)
         print(f'  Epoch: {epoch:d}')
+        print(f'  (No Ensembling)')
         for key, val in training_stats.items():
             print(f'  {key}: {val:5.4f}')
         for key, val in eval_stats.items():

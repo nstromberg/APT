@@ -65,7 +65,7 @@ class PatchEmbedding(nn.Module):
 
     def forward(self, x):
         """
-        x: (batch_size, sequence_length, feature_size)
+        x: (batch_size, data_size, feature_size)
         """
         _, l, f = x.size()
         x = self._patchify(x.view(-1, 1, f))
