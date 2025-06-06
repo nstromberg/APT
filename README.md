@@ -1,5 +1,16 @@
 # Adversarially Pre-trained Transformer
 
+This repository is the official implementation of [**Zero-shot Meta-learning for Tabular Prediction Tasks with Adversarially Pre-trained Transformer**](https://arxiv.org/abs/2502.04573).
+
+```BiBTeX
+@article{wu2025zero,
+  title={Zero-shot Meta-learning for Tabular Prediction Tasks with Adversarially Pre-trained Transformer},
+  author={Wu, Yulun and Bergman, Doron L},
+  journal={International Conference on Machine Learning},
+  year={2025}
+}
+```
+
 
 ## Installation
 
