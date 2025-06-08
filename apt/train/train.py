@@ -1,12 +1,10 @@
 import os
+import logging
 from contextlib import nullcontext
 from collections import defaultdict
-from datetime import datetime
 
 import torch
 from torch import nn
-from torch.cuda.amp import autocast, GradScaler
-from torch.utils.tensorboard import SummaryWriter
 
 from .utils import init_dist, cleanup_dist, get_openai_lr, get_cosine_schedule_with_warmup, evaluate
 
@@ -29,7 +27,7 @@ def prepare(args, device):
         model = APT(**init_args)
         model.load_state_dict(state_dict)
     model.to(device)
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters())/1000/1000:.{2}f} M")
+    logging.info(f"Number of parameters: {sum(p.numel() for p in model.parameters())/1000/1000:.{2}f} M")
 
     # dataset
     data_loader = DataGenerator(classification=args.classification,
@@ -45,12 +43,7 @@ def prepare(args, device):
 
     return model, data_loader
 
-def train(args):
-    dt = datetime.now().strftime("%Y.%m.%d_%H:%M:%S")
-    writer = SummaryWriter(log_dir=os.path.join(args.artifact_path, "runs/" + args.name + "_" + dt))
-    save_dir = os.path.join(args.artifact_path, "saves/" + args.name + "_" + dt)
-    os.makedirs(save_dir, exist_ok=True)
-
+def train(args, writer, save_dir):
     # device
     device = args.device if torch.cuda.is_available() else 'cpu'
     using_dist, rank, device = init_dist(device)
@@ -58,7 +51,7 @@ def train(args):
     # model & dataloader
     model, data_loader = prepare(args, device)
     if using_dist:
-        print("Distributed training")
+        logging.info("Distributed training")
         model = nn.parallel.DistributedDataParallel(model,
             device_ids=[rank], output_device=rank, broadcast_buffers=False
         )
@@ -69,7 +62,7 @@ def train(args):
     # optimizer & scheduler
     if args.lr is None:
         lr = get_openai_lr(model)
-        print(f"Using OpenAI max lr of {lr}.")
+        logging.info(f"Using OpenAI max lr of {lr}.")
     else:
         lr = args.lr
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=args.weight_decay)
@@ -79,7 +72,7 @@ def train(args):
 
     if args.data_lr is None:
         data_lr = get_openai_lr(data_loader)
-        print(f"Using OpenAI max lr of {data_lr}.")
+        logging.info(f"Using OpenAI max lr of {data_lr}.")
     else:
         data_lr = args.data_lr
     data_optimizer = torch.optim.AdamW(data_loader.parameters(),
@@ -95,13 +88,13 @@ def train(args):
                 torch.save(val, os.path.join(save_dir, key))
 
         # reporting
-        print('-' * 89)
-        print(f'  Epoch: 0')
+        logging.info('-' * 89)
+        logging.info(f'  Epoch: 0')
         for key, val in eval_stats.items():
-            print(f'  {key}: {val:5.4f}')
+            logging.info(f'  {key}: {val:5.4f}')
             if rank == 0:
                 writer.add_scalar(key, val, 0)
-        print('-' * 89)
+        logging.info('-' * 89)
     for epoch in range(1, args.max_epochs+1):
         # optimizing
         epoch_training_stats = train_epoch(model, optimizer, data_loader, data_optimizer,
@@ -137,16 +130,16 @@ def train(args):
         eval_stats = evaluate(model, data_loader.get_eval_data())
 
         # reporting
-        print('-' * 89)
-        print(f'  Epoch: {epoch:d}')
-        print(f'  (No Ensembling)')
+        logging.info('-' * 89)
+        logging.info(f'  Epoch: {epoch:d}')
+        logging.info(f'  (No Ensembling)')
         for key, val in training_stats.items():
-            print(f'  {key}: {val:5.4f}')
+            logging.info(f'  {key}: {val:5.4f}')
         for key, val in eval_stats.items():
-            print(f'  {key}: {val:5.4f}')
+            logging.info(f'  {key}: {val:5.4f}')
             if rank == 0:
                 writer.add_scalar(key, val, epoch)
-        print('-' * 89)
+        logging.info('-' * 89)
 
     if using_dist:
         cleanup_dist()

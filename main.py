@@ -1,8 +1,10 @@
+import os
+import logging
 import argparse
-import multiprocessing as mp
+from datetime import datetime
 
 import torch
-import torch.multiprocessing as tmp
+from torch.utils.tensorboard import SummaryWriter
 
 from apt.train import train
 
@@ -45,16 +47,36 @@ def parse_arguments():
     parser.add_argument("--mp", action="store_true")
     parser.add_argument("--aggregate_k_gradients", type=int, default=2)
     parser.add_argument("--initial_eval", action="store_true")
-    parser.add_argument("--max_epochs", type=int, default=50)
+    parser.add_argument("--max_epochs", type=int, default=100)
     parser.add_argument("--warmup_epochs", type=int, default=0)
     parser.add_argument("--steps_per_epoch", type=int, default=500)
     parser.add_argument("--checkpoint_freq", type=int, default=2)
 
     return parser.parse_args()
 
+def initialize_logger(artifact_path, name=None, level='INFO'):
+    logfile = os.path.join(artifact_path, 'log.txt')
+    if name is None:
+        logger = logging.getLogger()
+    else:
+        logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    handler_console = logging.StreamHandler()
+    handler_file    = logging.FileHandler(logfile)
+
+    logger.addHandler(handler_console)
+    logger.addHandler(handler_file)
+    return logger
+
 
 if __name__ == "__main__":
     args = parse_arguments()
-    print(vars(args))
+    dt = datetime.now().strftime("%Y.%m.%d_%H:%M:%S")
+    writer = SummaryWriter(log_dir=os.path.join(args.artifact_path, "runs/" + args.name + "_" + dt))
+    save_dir = os.path.join(args.artifact_path, "saves/" + args.name + "_" + dt)
+    os.makedirs(save_dir, exist_ok=True)
+    initialize_logger(save_dir)
+    logging.info(vars(args))
 
-    train(args)
+    train(args, writer, save_dir)
