@@ -2,6 +2,8 @@
 
 This repository is the official implementation of [**Zero-shot Meta-learning for Tabular Prediction Tasks with Adversarially Pre-trained Transformer**](https://arxiv.org/abs/2502.04573).
 
+![](figure/workflow.png)
+
 ```BiBTeX
 @article{wu2025zero,
   title={Zero-shot Meta-learning for Tabular Prediction Tasks with Adversarially Pre-trained Transformer},
