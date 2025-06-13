@@ -50,7 +50,7 @@ class LinearAttention(nn.Module):
 
         self.to_qkv = nn.Linear(d_in, d_model * 3, bias=False)
         self.mem_kv = nn.Parameter(torch.randn(2, n_heads, num_mem_kv, self.d_head))
-        self.rope = RotaryPositionalEncoding(self.d_head) if rope is not None else None
+        self.rope = RotaryPositionalEncoding(self.d_head) if rope else None
 
     def forward(self, x, mask=None, kv_cache=False):
         """
