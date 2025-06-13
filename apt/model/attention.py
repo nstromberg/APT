@@ -7,9 +7,39 @@ import torch.nn.functional as F
 from .utils import set_device_config
 
 
+class RotaryPositionalEncoding(nn.Module):
+  def __init__(self, dim: int, base: int = 10_000):
+    super().__init__()
+    self.dim = dim
+    self.base = base
+    self.cos_cached = None
+    self.sin_cached = None
+
+  def _neg_half(self, x: torch.Tensor):
+    half_dim = self.dim // 2
+    return torch.cat([-x[..., half_dim:], x[..., :half_dim]], dim=-1)
+
+  def forward(self, x: torch.Tensor):
+    *b, l, _, _ = x.shape
+    n_b = len(b)
+    if self.cos_cached is None or l > self.cos_cached.shape[n_b]:
+        # build cache
+        theta = 1. / (self.base ** (torch.arange(0, self.dim, 2, device=x.device).float() / self.dim))
+        seq_idx = torch.arange(l, device=x.device).float()
+        idx_theta = torch.einsum('n,d->nd', seq_idx, theta)
+        idx_theta2 = torch.cat([idx_theta, idx_theta], dim=1)
+
+        self.cos_cached = idx_theta2.cos()[:, None, :][(None,) * n_b]
+        self.sin_cached = idx_theta2.sin()[:, None, :][(None,) * n_b]
+
+    neg_half_x = self._neg_half(x)
+    x_rope = (x * self.cos_cached[..., :x.shape[n_b], :, :]) + (neg_half_x * self.sin_cached[..., :x.shape[n_b], :, :])
+    return x_rope
+
+
 class LinearAttention(nn.Module):
     def __init__(self, d_model=128, n_heads=4, d_in=None,
-                 num_mem_kv=4, dropout=0.0):
+                 num_mem_kv=4, dropout=0.0, rope=False):
         super().__init__()
         d_in = d_model if d_in is None else d_in
 
@@ -20,6 +50,7 @@ class LinearAttention(nn.Module):
 
         self.to_qkv = nn.Linear(d_in, d_model * 3, bias=False)
         self.mem_kv = nn.Parameter(torch.randn(2, n_heads, num_mem_kv, self.d_head))
+        self.rope = RotaryPositionalEncoding(self.d_head) if rope is not None else None
 
     def forward(self, x, mask=None, kv_cache=False):
         """
@@ -31,6 +62,9 @@ class LinearAttention(nn.Module):
 
         qkv = self.to_qkv(x).view(*b, l, self.n_heads, -1, 3).transpose(-4, -3)
         q, k, v = qkv[..., 0], qkv[..., 1], qkv[..., 2]
+        if self.rope is not None:
+            qk = self.rope(torch.stack((q, k), dim=0))
+            q, k = qk[0], qk[1]
 
         out, kv_cache = self.attend(q, k, v, mask=mask, kv_cache=kv_cache)
 
@@ -85,8 +119,8 @@ class LinearAttention(nn.Module):
 
 class FullAttention(LinearAttention):
     def __init__(self, d_model=128, n_heads=4, d_in=None,
-                 num_mem_kv=4, dropout=0.0, flash=True):
-        super().__init__(d_model, n_heads, d_in, num_mem_kv, dropout)
+                 num_mem_kv=4, dropout=0.0, rope=False, flash=True):
+        super().__init__(d_model, n_heads, d_in, num_mem_kv, dropout, rope)
         self.cpu_config, self.cuda_config = set_device_config(flash)
         self.flash = flash
 

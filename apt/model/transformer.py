@@ -11,11 +11,12 @@ class TransformerBlock(nn.Module):
     """A Transformer block."""
 
     def __init__(self, d_model=512, n_heads=4, d_ff=2048,
-                 dropout=0.1, activation="gelu", norm_eps=1e-5):
+                 dropout=0.1, activation="gelu",
+                 norm_eps=1e-5, rope=False):
         """Initializes a new TransformerBlock instance.
         """
         super().__init__()
-        self._attn = FullAttention(d_model, n_heads, dropout=dropout)
+        self._attn = FullAttention(d_model, n_heads, dropout=dropout, rope=rope)
         self._ln_attn = nn.LayerNorm(d_model, eps=norm_eps)
 
         self._ff = FeedForward(d_ff, in_dim=d_model, out_dim=d_model,
@@ -33,7 +34,7 @@ class TransformerBlock(nn.Module):
 
 class PatchEmbedding(nn.Module):
     def __init__(self, patch_size=128, d_model=512, n_heads=4, d_ff=2048,
-                 dropout=0.0, activation="gelu", norm_eps=1e-5):
+                 dropout=0.0, activation="gelu", norm_eps=1e-5, rope=False):
         super().__init__()
         self.patch_size = patch_size
 
@@ -58,7 +59,8 @@ class PatchEmbedding(nn.Module):
 
         self._emb = TransformerBlock(
             d_model=d_model, n_heads=n_heads, d_ff=d_ff,
-            dropout=dropout, activation=activation, norm_eps=norm_eps
+            dropout=dropout, activation=activation,
+            norm_eps=norm_eps, rope=rope
         )
 
         self._ln = nn.LayerNorm(d_model, eps=norm_eps)
