@@ -121,10 +121,7 @@ def train(args, writer, save_dir):
         # saving
         if epoch % args.checkpoint_freq == 0 and rank == 0:
             module = model.module if using_dist else model
-            torch.save(
-                (module.state_dict(), module.init_args),
-                os.path.join(save_dir, f"model_epoch={epoch}.pt")
-            )
+            module.save_checkpoint(os.path.join(save_dir, f"model_epoch={epoch}.pt"))
 
         # evaluating
         eval_stats = evaluate(model, data_loader.get_eval_data())

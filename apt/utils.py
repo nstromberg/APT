@@ -31,7 +31,7 @@ def torch_nanmean(x, dim=None, keepdim=False, return_percentage=False):
 def torch_nanstd(x, dim=None, keepdim=False, return_percentage=False, eps=1e-5):
     return masked_std(x, ~torch.isnan(x), dim=dim, keepdim=keepdim, return_percentage=return_percentage, eps=eps)
 
-def clip_outliers(data, dim=1, mask=None, n_sigma=4):
+def clip_outliers(data, dim=0, mask=None, n_sigma=4):
     if mask is None:
         mask = ~torch.isnan(data)
     data_mean = masked_mean(data, mask, dim=dim, keepdim=True)
@@ -43,25 +43,23 @@ def clip_outliers(data, dim=1, mask=None, n_sigma=4):
     data = torch.min(torch.log(1+torch.abs(data)) + upper, data)
     return data
 
-def normalize_data(data, dim=1, mask=None):
+def normalize_data(data, dim=0, mask=None, mean=None, std=None, transform=True):
     if mask is None:
         mask = ~torch.isnan(data)
-    mean = masked_mean(data, mask, dim=dim, keepdim=True)
-    std = masked_std(data, mask, dim=dim, keepdim=True)
+    if mean is None:
+        mean = masked_mean(data, mask, dim=dim, keepdim=True)
+    if std is None:
+        std = masked_std(data, mask, dim=dim, keepdim=True)
 
-    data = (data - mean) / std
+    if transform:
+        return (data - mean) / std
+    return mean, std
+
+def process_tensor(data, dim=0, mask=None, mean=None, std=None, transform=True):
+    data = clip_outliers(data, dim=dim, mask=mask)
+    data = normalize_data(data, dim=dim, mask=mask, mean=mean, std=std, transform=transform)
+
     return data
-
-def process(xs, ys, dim=1, mask=None, classification=False):
-    # clip outliers
-    xs = clip_outliers(xs, dim=dim, mask=mask)
-    xs = normalize_data(xs, dim=dim, mask=mask)
-
-    if not classification:
-        ys = clip_outliers(ys, dim=dim)
-        ys = normalize_data(ys, dim=dim)
-
-    return xs, ys
 
 def process_data(data, classification=False):
     x_train, y_train, x_test, y_test = data
@@ -75,7 +73,9 @@ def process_data(data, classification=False):
 
     xs = torch.cat((x_train, x_test), dim=0)
     ys = torch.cat((y_train, y_test), dim=0)
-    xs, ys = process(xs, ys, dim=0, classification=classification)
+    xs = process_tensor(xs)
+    if not classification:
+        ys = process_tensor(ys)
 
     return (
         xs[:-n_test, :],
@@ -83,3 +83,46 @@ def process_data(data, classification=False):
         xs[-n_test:, :],
         ys[-n_test:]
     )
+
+
+class NumericEncoder:
+    def __init__(self):
+        self.mean = None
+        self.std = None
+
+    def fit(self, data):
+        self.mean, self.std = process_tensor(data, transform=False)
+        return self
+
+    def transform(self, data):
+        return process_tensor(data, mean=self.mean, std=self.std)
+
+    def fit_transform(self, data, dim=0):
+        self.fit(data, dim=dim)
+        return self.transform(data)
+
+    def inverse_transform(self, data):
+        data = data * self.std + self.mean
+        return data
+
+
+class CategoricalEncoder:
+    def __init__(self):
+        self.categories = None
+        self.category_map = None
+
+    def fit(self, data):
+        self.categories = torch.unique(data)
+        categories = self.categories.tolist()
+        self.category_map = dict(zip(categories, range(len(categories))))
+        return self
+
+    def transform(self, data):
+        return torch.tensor([self.category_map[cat] for cat in data.tolist()], dtype=data.dtype)
+
+    def fit_transform(self, data):
+        self.categories, data = torch.unique(data, return_inverse=True)
+        return data
+
+    def inverse_transform(self, data):
+        return torch.take(self.categories, data)

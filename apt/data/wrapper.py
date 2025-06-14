@@ -4,7 +4,7 @@ import torch
 
 from .mlp import MultilayerPerceptron
 
-from apt.utils import process, process_data
+from apt.utils import process_tensor, process_data
 
 
 class DataGenerator(MultilayerPerceptron):
@@ -24,7 +24,9 @@ class DataGenerator(MultilayerPerceptron):
         x, mask = self.add_missing(x, return_mask=True)
 
         # process
-        x, y = process(x, y, dim=1, mask=mask, classification=self.classification)
+        x = process_tensor(x, dim=1, mask=mask)
+        if not self.classification:
+            y = process_tensor(y, dim=1)
 
         return x, y
 

@@ -34,9 +34,9 @@ pip install -e .
 ```
 
 
-## Checkpoints
+## Evaluation
 
-Our checkpoints are stored [here](https://osf.io/c67wt/).
+See `evaluate_classification.ipynb` and `evaluate_regression.ipynb` for examples.
 
 
 ## Pre-training
@@ -48,9 +48,9 @@ Our checkpoints are stored [here](https://osf.io/c67wt/).
 A list of flags may be found in `main.sh` and `main.py` for experimentation with different hyperparameters. The run log is saved under `logs/`, models are saved under `*artifact_path*/saves`, and the tensorboard log is saved under `*artifact_path*/runs`.
 
 
-## Evaluation
+## Checkpoints
 
-See `evaluate_classification.ipynb` and `evaluate_regression.ipynb` for examples.
+Our checkpoints are stored [here](https://osf.io/c67wt/).
 
 
 ## License

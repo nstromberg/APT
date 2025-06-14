@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from .transformer import TransformerBlock, PatchEmbedding, MixtureBlock
 from .feedforward import FeedForward
-from .utils import get_args, scatter_sum, auc_metric
+from .utils import scatter_sum, auc_metric
 
 from sklearn.metrics import (
     accuracy_score, balanced_accuracy_score, log_loss,
@@ -16,10 +16,14 @@ class APT(nn.Module):
     def __init__(self, n_blocks, d_patch=100, d_model=512, d_ff=2048, n_heads=4,
                  dropout=0.1, activation="gelu", norm_eps=1e-5, classification=True):
         super().__init__()
-        # TODO: feed normalized dataset in training, normalize dataset in inference
-        # TODO: is the original zero initialization for transformer necessary?
-        # TODO: dropout for context aggregation?
-        self.init_args = get_args(vars())
+        self.n_blocks = n_blocks
+        self.d_patch = d_patch
+        self.d_model = d_model
+        self.d_ff = d_ff
+        self.n_heads = n_heads
+        self.dropout = dropout
+        self.activation = activation
+        self.norm_eps = norm_eps
         self.classification = classification
 
         self._emb_x = PatchEmbedding(
@@ -48,10 +52,6 @@ class APT(nn.Module):
                 d_model, in_dim=d_model, out_dim=2,
                 activation=activation, bias=True
             )
-
-        self.x_train = None
-        self.y_train = None
-        self.feature_perm = None
 
     def forward(self, x, y_train):
         split = y_train.shape[1]
@@ -211,86 +211,17 @@ class APT(nn.Module):
                 "Test R2": r2_score(target, pred),
             }
 
-    def get_score(self, metric, value):
-        if metric in ["ce", "mse", "mae"]:
-            return -value
-        else:
-            return value
-
-    @torch.no_grad()
-    def fit(self, x_train, y_train, val_size=0.2, tune=True, metric=None, n_perms=32, batch_size=3000):
-        """
-        x_train: (train_size, feature_size)
-        y_train: (train_size)
-        x_test: (test_size, feature_size)
-        y_test: (test_size,)
-        """
-        x_train = torch.as_tensor(x_train)
-        y_train = torch.as_tensor(y_train)
-        self.x_train = x_train
-        self.y_train = y_train
-
-        if tune:
-            data_perm = torch.randperm(x_train.shape[0])
-            val_size = int(val_size * x_train.shape[0])
-            val_x_test = x_train[data_perm[:val_size]]
-            val_x_train = x_train[data_perm[val_size:]]
-            val_y_test = y_train[data_perm[:val_size]]
-            val_y_train = y_train[data_perm[val_size:]]
-
-            default_result = self.evaluate_helper(
-                val_x_train, val_y_train, val_x_test, val_y_test,
-                batch_size=batch_size, metric=metric
-            )
-            best_score = default_result["Test AUC"] if self.classification else -default_result["Test MSE"]
-            best_perm = None
-            for _ in range(n_perms):
-                feature_perm = torch.randperm(x_train.shape[1])
-                val_x_train_perm = val_x_train[:, feature_perm]
-                val_x_test_perm = val_x_test[:, feature_perm]
-
-                if metric is None:
-                    metric = "auc" if self.classification else "mse"
-                result = self.evaluate_helper(
-                    val_x_train_perm, val_y_train, val_x_test_perm, val_y_test,
-                    batch_size=batch_size, metric=metric
-                )
-                score = self.get_score(metric, result)
-
-                if score > best_score:
-                    best_perm = feature_perm
-                    best_score = score
-            self.feature_perm = best_perm
-
-        return self
-
-    def get_data(self, x_test, y_test=None):
-        x_train = self.x_train
-        y_train = self.y_train
-        if self.feature_perm is not None:
-            x_train = x_train[:, self.feature_perm]
-            x_test = x_test[:, self.feature_perm]
-
-        x_test = torch.as_tensor(x_test)
-        if y_test is not None:
-            y_test = torch.as_tensor(y_test)
-            return x_train, y_train, x_test, y_test
-        return x_train, y_train, x_test
-
-    def evaluate(self, x_test, y_test, batch_size=3000, metric=None):
-        return self.evaluate_helper(
-            *self.get_data(x_test, y_test),
-            batch_size=batch_size, metric=metric
-        )
-
-    def predict_proba(self, x_test, batch_size=3000):
-        if self.classification:
-            y_pred = self.predict_helper(*self.get_data(x_test), batch_size=batch_size)
-            return y_pred.cpu().numpy()
-        return NotImplementedError
-
-    def predict(self, x_test, batch_size=3000):
-        y_pred = self.predict_helper(*self.get_data(x_test), batch_size=batch_size)
-        if self.classification:
-            return torch.argmax(y_pred, dim=-1).cpu().numpy()
-        return y_pred.cpu().numpy()
+    def save_checkpoint(self, path):
+        init_args = {
+            "n_blocks": self.n_blocks,
+            "d_patch": self.d_patch,
+            "d_model": self.d_model,
+            "d_ff": self.d_ff,
+            "n_heads": self.n_heads,
+            "dropout": self.dropout,
+            "activation": self.activation,
+            "norm_eps": self.norm_eps,
+            "classification": self.classification
+        }
+        torch.save((self.state_dict(), init_args), path)
+        print(f"Model saved to {path}")
