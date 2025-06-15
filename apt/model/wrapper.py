@@ -130,7 +130,9 @@ class APTPredictor(APT):
     def predict(self, x_test, max_train=3000):
         y_pred = self.predict_helper(*self.get_data(x_test), max_train=max_train)
         if self.classification:
-            return torch.argmax(y_pred, dim=-1).cpu().numpy()
+            y_pred = torch.argmax(y_pred, dim=-1)
+        if self.y_encoder is not None:
+            y_pred = self.y_encoder.inverse_transform(y_pred)
         return y_pred.cpu().numpy()
 
 

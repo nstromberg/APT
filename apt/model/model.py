@@ -163,7 +163,8 @@ class APT(nn.Module):
             y_train = y_train.to(torch.long)
             if n_classes is None:
                 n_classes = y_train.max() + 1
-        device = next(self.parameters()).device
+        device_m = next(self.parameters()).device
+        device_t = y_train.device
         split = y_train.shape[0]
 
         if split > max_train:
@@ -172,12 +173,12 @@ class APT(nn.Module):
             y_train = y_train[inds[:max_train]]
 
         x = torch.cat((x_train, x_test), dim=-2)
-        x, y_train = map(lambda t: t.to(device), (x, y_train))
+        x, y_train = map(lambda t: t.to(device_m), (x, y_train))
         out = self.forward(x.unsqueeze(0), y_train.unsqueeze(0)).squeeze(0)
 
         if self.classification:
-            return scatter_sum(out, y_train, dim=1, dim_size=n_classes)
-        return out[..., 0]
+            return scatter_sum(out, y_train, dim=1, dim_size=n_classes).to(device_t)
+        return out[..., 0].to(device_t)
 
     @torch.no_grad()
     def evaluate_helper(self, x_train, y_train, x_test, y_test, max_train=3000, n_classes=None, metric=None):
