@@ -53,7 +53,12 @@ class APT(nn.Module):
                 activation=activation, bias=True
             )
 
-    def forward(self, x, y_train):
+    def forward(self, x, y_train, mask=None):
+        """
+        x: (batch_size, data_size, feature_size)
+        y: (batch_size, data_size)
+        mask: (batch_size, data_size)
+        """
         split = y_train.shape[1]
 
         x = self._emb_x(x) # (batch_size, data_size, d_model)
@@ -61,7 +66,9 @@ class APT(nn.Module):
         y_train = self._emb_y(y_train.to(x.dtype).unsqueeze(-1)) # (batch_size, n_train, d_model)
 
         hidden = torch.cat([x_train + y_train, x_test], dim=1) # (batch_size, data_size, d_model)
-        mask = self.get_mask(split, hidden.shape[1] - split).to(hidden.device)
+        if mask is not None:
+            mask = mask.to(hidden.dtype)
+        mask = self.get_mask(split, hidden.shape[1] - split, mask=mask).to(hidden.device)
 
         for _, block in enumerate(self._transformer):
             hidden = block(hidden, mask=mask) # (batch_size, data_size, d_model)
@@ -74,7 +81,6 @@ class APT(nn.Module):
         """
         x: (batch_size, data_size, feature_size)
         y: (batch_size, data_size)
-        mask: (batch_size, data_size, feature_size)
         """
         if split is None:
             split = int(x.shape[1]*train_size)
@@ -119,65 +125,82 @@ class APT(nn.Module):
             y_pred[..., 0], y_test, F.softplus(y_pred[..., 1]), full=True, eps=eps
         )
 
-    def get_mask(self, n_train, n_test):
+    def get_mask(self, n_train, n_test, mask=None):
+        if mask is None:
+            """
+            attention mask:
+                e.g. train - 4, test - 2
+                [
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                ]
+            """
+            return torch.cat((
+                torch.ones(n_train+n_test, n_train),
+                torch.zeros(n_train+n_test, n_test)
+            ), dim=1) # (n_train+n_test, n_train+n_test)
         """
-        enc mask:
-            e.g. train - 4, test - 2
-            [
-             [1, 1, 1, 1, 0, 0],
-             [1, 1, 1, 1, 0, 0],
-             [1, 1, 1, 1, 0, 0],
-             [1, 1, 1, 1, 0, 0],
-             [1, 1, 1, 1, 0, 0],
-             [1, 1, 1, 1, 0, 0],
-            ]
+        mask: (batch_size, n_train)
         """
-        mask = torch.cat((
-            torch.ones(n_train+n_test, n_train),
-            torch.zeros(n_train+n_test, n_test)
-        ), dim=1) # (n_train+n_test, n_train+n_test)
-        return mask
+        return torch.stack([
+            torch.cat((
+                m, torch.zeros(n_test, device=m.device)
+            )).unsqueeze(0).repeat(n_train+n_test, 1) for m in mask
+        ], dim=0) # (batch_size, n_train+n_test, n_train+n_test)
 
     @torch.no_grad()
-    def predict_helper(self, x_train, y_train, x_test, batch_size=3000, dim_size=None):
+    def predict_helper(self, x_train, y_train, x_test, max_train=3000, n_classes=None):
         """
         x_train: (train_size, feature_size)
         y_train: (train_size,)
         x_test: (test_size, feature_size)
         """
-        device = next(self.parameters()).device
-
-        train_size = min(batch_size, y_train.shape[0])
-        x = torch.cat((x_train[:train_size, :], x_test), dim=-2)
-        y_train = y_train[:train_size]
         if self.classification:
             y_train = y_train.to(torch.long)
+            if n_classes is None:
+                n_classes = y_train.max() + 1
+        device = next(self.parameters()).device
+        split = y_train.shape[0]
 
+        if split > max_train:
+            inds = torch.randperm(split)
+            x_train = x_train[inds[:max_train], :]
+            y_train = y_train[inds[:max_train]]
+
+        x = torch.cat((x_train, x_test), dim=-2)
         x, y_train = map(lambda t: t.to(device), (x, y_train))
         out = self.forward(x.unsqueeze(0), y_train.unsqueeze(0)).squeeze(0)
 
         if self.classification:
-            return scatter_sum(out, y_train, dim=1,
-                dim_size=(y_train.max().tolist() + 1 if dim_size is None else dim_size))
+            return scatter_sum(out, y_train, dim=1, dim_size=n_classes)
         return out[..., 0]
 
     @torch.no_grad()
-    def evaluate_helper(self, x_train, y_train, x_test, y_test, batch_size=3000, metric=None):
+    def evaluate_helper(self, x_train, y_train, x_test, y_test, max_train=3000, n_classes=None, metric=None):
         """
         x_train: (train_size, feature_size)
         y_train: (train_size)
         x_test: (test_size, feature_size)
         y_test: (test_size,)
         """
-        device = next(self.parameters()).device
         if self.classification:
-            y_test = y_test.to(torch.long).to(device)
+            y_train = y_train.to(torch.long)
+            y_test = y_test.to(torch.long)
+            if n_classes is None:
+                n_classes = torch.cat((y_train, y_test)).max() + 1
+
+        y_pred = self.predict_helper(
+            x_train, y_train, x_test,
+            max_train=max_train,
+            n_classes=n_classes
+        )
+
         target = y_test.cpu().numpy()
-
         if self.classification:
-            y_pred = self.predict_helper(x_train, y_train, x_test, batch_size=batch_size,
-                dim_size=(max(y_train.max().tolist(), y_test.max().tolist()) + 1))
-
             proba = y_pred.cpu().numpy()
             pred = torch.argmax(y_pred, dim=-1).cpu().numpy()
             if metric == "acc":
@@ -195,8 +218,6 @@ class APT(nn.Module):
                     "Test CE": log_loss(target, proba),
                     "Test AUC": auc_metric(target, proba),
                 }
-        y_pred = self.predict_helper(x_train, y_train, x_test, batch_size=batch_size)
-
         pred = y_pred.cpu().numpy()
         if metric == "mse":
             return mean_squared_error(target, pred)
