@@ -163,9 +163,9 @@ class APT(nn.Module):
         x_test: (test_size, feature_size)
         """
         if self.classification:
-                y_train = y_train.to(torch.long)
-                if n_classes is None:
-                    n_classes = y_train.max() + 1
+            y_train = y_train.to(torch.long)
+            if n_classes is None:
+                n_classes = y_train.max() + 1
         device_m = next(self.parameters()).device
         device_t = y_train.device
         split = y_train.shape[0]
@@ -213,12 +213,13 @@ class APT(nn.Module):
             res = scatter_sum(out.transpose(0,1).reshape(out.shape[1], -1),
                 y_train.reshape(-1), dim=1, dim_size=(n_classes * batch_size))
             res = res.reshape(-1, batch_size, n_classes).transpose(0,1)
-            weights = (
-                mask.sum(dim=1, keepdim=True).unsqueeze(-1) if mask is not None else
-                torch.tensor([1], device=device_m)
-            )
+            if batch_size == 1:
+                return res.squeeze(0).to(device_t)
+            weights = mask.sum(dim=1, keepdim=True).unsqueeze(-1)
         else:
             res = out[..., 0]
+            if batch_size == 1:
+                return res.squeeze(0).to(device_t)
             weights = 1. / F.softplus(out[..., 1]).add(eps)
         weights = weights / weights.sum(0, keepdim=True)
         return (res * weights).sum(0).to(device_t)
