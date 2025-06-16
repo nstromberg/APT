@@ -35,7 +35,7 @@ class APTPredictor(APT):
 
     @torch.no_grad()
     def fit(self, x_train, y_train, val_size=0.2, process_data=True,
-            tune=True, metric=None, n_perms=32, max_train=3000):
+            tune=True, metric=None, n_perms=32, max_train=3000, max_test=3000):
         """
         x_train: (train_size, feature_size)
         y_train: (train_size)
@@ -72,7 +72,7 @@ class APTPredictor(APT):
 
             default_result = self.evaluate_helper(
                 val_x_train, val_y_train, val_x_test, val_y_test,
-                max_train=max_train, metric=metric
+                max_train=max_train, max_test=max_test, metric=metric
             )
             best_score = default_result["Test AUC"] if self.classification else -default_result["Test MSE"]
             best_perm = None
@@ -85,7 +85,7 @@ class APTPredictor(APT):
                     metric = "auc" if self.classification else "mse"
                 result = self.evaluate_helper(
                     val_x_train_perm, val_y_train, val_x_test_perm, val_y_test,
-                    max_train=max_train, metric=metric
+                    max_train=max_train, max_test=max_test, metric=metric
                 )
                 score = self.get_score(metric, result)
 
@@ -115,20 +115,26 @@ class APTPredictor(APT):
             return x_train, y_train, x_test, y_test
         return x_train, y_train, x_test
 
-    def evaluate(self, x_test, y_test, max_train=3000, metric=None):
+    def evaluate(self, x_test, y_test, max_train=3000, max_test=3000, metric=None):
         return self.evaluate_helper(
             *self.get_data(x_test, y_test),
-            max_train=max_train, metric=metric
+            max_train=max_train, max_test=max_test, metric=metric
         )
 
-    def predict_proba(self, x_test, max_train=3000):
+    def predict_proba(self, x_test, max_train=3000, max_test=3000):
         if self.classification:
-            y_pred = self.predict_helper(*self.get_data(x_test), max_train=max_train)
+            y_pred = self.predict_helper(
+                *self.get_data(x_test),
+                max_train=max_train, max_test=max_test
+            )
             return y_pred.cpu().numpy()
         return NotImplementedError
 
-    def predict(self, x_test, max_train=3000):
-        y_pred = self.predict_helper(*self.get_data(x_test), max_train=max_train)
+    def predict(self, x_test, max_train=3000, max_test=3000):
+        y_pred = self.predict_helper(
+            *self.get_data(x_test),
+            max_train=max_train, max_test=max_test
+        )
         if self.classification:
             y_pred = torch.argmax(y_pred, dim=-1)
         if self.y_encoder is not None:

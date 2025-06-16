@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -153,35 +155,77 @@ class APT(nn.Module):
         ], dim=0) # (batch_size, n_train+n_test, n_train+n_test)
 
     @torch.no_grad()
-    def predict_helper(self, x_train, y_train, x_test, max_train=3000, n_classes=None):
+    def predict_helper(self, x_train, y_train, x_test,
+            max_train=3000, max_test=3000, subsample=True, n_classes=None, eps=1e-6):
         """
         x_train: (train_size, feature_size)
         y_train: (train_size,)
         x_test: (test_size, feature_size)
         """
         if self.classification:
-            y_train = y_train.to(torch.long)
-            if n_classes is None:
-                n_classes = y_train.max() + 1
+                y_train = y_train.to(torch.long)
+                if n_classes is None:
+                    n_classes = y_train.max() + 1
         device_m = next(self.parameters()).device
         device_t = y_train.device
         split = y_train.shape[0]
 
-        if split > max_train:
-            inds = torch.randperm(split)
-            x_train = x_train[inds[:max_train], :]
-            y_train = y_train[inds[:max_train]]
+        if split > max_train and not subsample:
+            batch_size = math.ceil(split / max_train)
+            train_size = batch_size * max_train
+            x_train = F.pad(
+                x_train, (0, 0, 0, train_size - split), "constant", 0
+            ).reshape(batch_size, max_train, -1)
+            y_train = F.pad(
+                y_train, (0, train_size - split), "constant", -1
+            ).reshape(batch_size, max_train)
+            mask = F.pad(
+                torch.ones(split), (0, train_size - split), "constant", 0
+            ).reshape(batch_size, max_train)
+        else:
+            batch_size = 1
+            if split > max_train:
+                inds = torch.randperm(split)
+                x_train = x_train[inds[:max_train], :]
+                y_train = y_train[inds[:max_train]]
+            x_train = x_train.unsqueeze(0)
+            y_train = y_train.unsqueeze(0)
+            mask = None
 
-        x = torch.cat((x_train, x_test), dim=-2)
-        x, y_train = map(lambda t: t.to(device_m), (x, y_train))
-        out = self.forward(x.unsqueeze(0), y_train.unsqueeze(0)).squeeze(0)
+        out = []
+        for i in range(0, x_test.shape[0], max_test):
+            x_test_batch = x_test[i:i+max_test, :].unsqueeze(0)
+            x = torch.cat((x_train, x_test_batch.repeat(batch_size, 1, 1)), dim=1)
+
+            x, y_train, mask = map(
+                lambda t: t.to(device_m) if t is not None else None,
+                (x, y_train, mask)
+            )
+
+            out_batch = self.forward(x, y_train, mask=mask)
+            out.append(out_batch)
+        out = torch.cat(out, dim=1)
 
         if self.classification:
-            return scatter_sum(out, y_train, dim=1, dim_size=n_classes).to(device_t)
-        return out[..., 0].to(device_t)
+            offsets = n_classes * torch.arange(1, batch_size, device=device_m).unsqueeze(-1)
+            y_train[1:] = y_train[1:] + offsets
+
+            res = scatter_sum(out.transpose(0,1).reshape(out.shape[1], -1),
+                y_train.reshape(-1), dim=1, dim_size=(n_classes * batch_size))
+            res = res.reshape(-1, batch_size, n_classes).transpose(0,1)
+            weights = (
+                mask.sum(dim=1, keepdim=True).unsqueeze(-1) if mask is not None else
+                torch.tensor([1], device=device_m)
+            )
+        else:
+            res = out[..., 0]
+            weights = 1. / F.softplus(out[..., 1]).add(eps)
+        weights = weights / weights.sum(0, keepdim=True)
+        return (res * weights).sum(0).to(device_t)
 
     @torch.no_grad()
-    def evaluate_helper(self, x_train, y_train, x_test, y_test, max_train=3000, n_classes=None, metric=None):
+    def evaluate_helper(self, x_train, y_train, x_test, y_test,
+            max_train=3000, max_test=3000, n_classes=None, metric=None):
         """
         x_train: (train_size, feature_size)
         y_train: (train_size)
@@ -197,6 +241,7 @@ class APT(nn.Module):
         y_pred = self.predict_helper(
             x_train, y_train, x_test,
             max_train=max_train,
+            max_test=max_test,
             n_classes=n_classes
         )
 
