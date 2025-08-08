@@ -148,11 +148,10 @@ class APT(nn.Module):
         """
         mask: (batch_size, n_train)
         """
-        return torch.stack([
-            torch.cat((
-                m, torch.zeros(n_test, device=m.device)
-            )).unsqueeze(0).repeat(n_train+n_test, 1) for m in mask
-        ], dim=0) # (batch_size, n_train+n_test, n_train+n_test)
+        return torch.cat((
+            mask,
+            torch.zeros(mask.shape[0], n_test, device=mask.device, dtype=mask.dtype)
+        ), dim=1).unsqueeze(1).repeat(1, n_train+n_test, 1)  # (batch_size, n_train+n_test, n_train+n_test)
 
     @torch.no_grad()
     def predict_helper(self, x_train, y_train, x_test,
