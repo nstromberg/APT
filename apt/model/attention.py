@@ -152,7 +152,10 @@ class FullAttention(LinearAttention):
         else:
             attn = torch.einsum(f"...ld, ...md -> ...lm", q, k)
             attn = attn * self.scale
-            attn = attn.masked_fill(mask == 0, float('-inf'))
+            if mask.dtype == torch.bool:
+                attn = attn.masked_fill(mask == 0, float('-inf'))
+            else:
+                attn = attn + mask
             attn = attn.softmax(dim=-1)
             attn = F.dropout(attn, p=self.dropout, training=self.training)
             out = torch.einsum(f"...lm, ...me -> ...le", attn, v)

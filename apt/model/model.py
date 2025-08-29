@@ -127,31 +127,38 @@ class APT(nn.Module):
             y_pred[..., 0], y_test, F.softplus(y_pred[..., 1]), full=True, eps=eps
         )
 
-    def get_mask(self, n_train, n_test, mask=None):
+    def get_mask(self, n_train, n_test, mask=None, as_bias=True, bias_scale=1.0):
+        """
+        attention mask:
+            e.g. train - 4, test - 2
+            [
+            [1, 1, 1, 1, 0, 0],
+            [1, 1, 1, 1, 0, 0],
+            [1, 1, 1, 1, 0, 0],
+            [1, 1, 1, 1, 0, 0],
+            [1, 1, 1, 1, 0, 0],
+            [1, 1, 1, 1, 0, 0],
+            ]
+        """
         if mask is None:
-            """
-            attention mask:
-                e.g. train - 4, test - 2
-                [
-                [1, 1, 1, 1, 0, 0],
-                [1, 1, 1, 1, 0, 0],
-                [1, 1, 1, 1, 0, 0],
-                [1, 1, 1, 1, 0, 0],
-                [1, 1, 1, 1, 0, 0],
-                [1, 1, 1, 1, 0, 0],
-                ]
-            """
-            return torch.cat((
+            attn_mask = torch.cat((
                 torch.ones(n_train+n_test, n_train),
                 torch.zeros(n_train+n_test, n_test)
             ), dim=1) # (n_train+n_test, n_train+n_test)
-        """
-        mask: (batch_size, n_train)
-        """
-        return torch.cat((
-            mask,
-            torch.zeros(mask.shape[0], n_test, device=mask.device, dtype=mask.dtype)
-        ), dim=1).unsqueeze(1).repeat(1, n_train+n_test, 1)  # (batch_size, n_train+n_test, n_train+n_test)
+        else:
+            """
+            mask: (batch_size, n_train)
+            """
+            attn_mask = torch.cat((
+                mask,
+                torch.zeros(mask.shape[0], n_test, device=mask.device, dtype=mask.dtype)
+            ), dim=1).unsqueeze(1).repeat(1, n_train+n_test, 1)  # (batch_size, n_train+n_test, n_train+n_test)
+
+        if as_bias:
+            # each test point attends to both train and test data
+            # with an additive constant bias towards train data
+            return bias_scale * attn_mask.float()
+        return attn_mask.bool()
 
     @torch.no_grad()
     def predict_helper(self, x_train, y_train, x_test,
