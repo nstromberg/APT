@@ -101,7 +101,7 @@ class MixtureBlock(nn.Module):
 
         self.temperature = temperature
 
-    def forward(self, hidden, split, quantile=0.3):
+    def forward(self, hidden, split):
         """
         x: (batch_size, data_size, hidden_size)
         """
@@ -112,14 +112,8 @@ class MixtureBlock(nn.Module):
         k_gates, q_gates = attn_gates[..., :split, :], attn_gates[..., split:, :]
         k_gates, q_gates = F.normalize(k_gates, dim=-1), F.normalize(q_gates, dim=-1)
         gates = torch.einsum(f"...ld, ...md -> ...lm", q_gates, k_gates)
-        if self.training:
-            gates = torch.distributions.RelaxedBernoulli(
-                self.temperature, logits=gates
-            ).rsample()
-        else:
-            gates = (
-                gates >= torch.quantile(gates, quantile, dim=-1, keepdim=True)
-            ).to(gates.dtype)
+        gates = torch.distributions.RelaxedBernoulli(
+            self.temperature, logits=gates).rsample()
 
         attn_logits = self._attn_logits(hidden)
         attn_logits = attn_logits.view(b, l, self.n_heads, -1).transpose(-3, -2)

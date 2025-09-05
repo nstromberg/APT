@@ -79,6 +79,29 @@ class APT(nn.Module):
             return self._out(hidden, split)
         return self._out(hidden[:, split:, ...])
 
+    def get_query_embedding(self, x, y_train, mask=None):
+        """
+        Returns the embedding for a query of Xs given the context of x and y.
+        x: (batch_size, data_size, feature_size)
+        y_train: (batch_size, n_train)
+        mask: (batch_size, data_size) or None
+        """
+        split = y_train.shape[1]
+
+        x = self._emb_x(x) # (batch_size, data_size, d_model)
+        x_train, x_test = x[:, :split, ...], x[:, split:, ...] # (batch_size, n_train, d_model), (batch_size, n_test, d_model)
+        y_train_emb = self._emb_y(y_train.to(x.dtype).unsqueeze(-1)) # (batch_size, n_train, d_model)
+
+        hidden = torch.cat([x_train + y_train_emb, x_test], dim=1) # (batch_size, data_size, d_model)
+        if mask is not None:
+            mask = mask.to(hidden.dtype)
+        mask = self.get_mask(split, hidden.shape[1] - split, mask=mask).to(hidden.device)
+
+        for _, block in enumerate(self._transformer):
+            hidden = block(hidden, mask=mask) # (batch_size, data_size, d_model)
+
+        return hidden[:, split:, ...] #(batch_size, n_test, d_model)
+
     def loss(self, x, y, split=None, train_size=0.95):
         """
         x: (batch_size, data_size, feature_size)
@@ -127,38 +150,32 @@ class APT(nn.Module):
             y_pred[..., 0], y_test, F.softplus(y_pred[..., 1]), full=True, eps=eps
         )
 
-    def get_mask(self, n_train, n_test, mask=None, as_bias=True, bias_scale=1.0):
-        """
-        attention mask:
-            e.g. train - 4, test - 2
-            [
-            [1, 1, 1, 1, 0, 0],
-            [1, 1, 1, 1, 0, 0],
-            [1, 1, 1, 1, 0, 0],
-            [1, 1, 1, 1, 0, 0],
-            [1, 1, 1, 1, 0, 0],
-            [1, 1, 1, 1, 0, 0],
-            ]
-        """
+    def get_mask(self, n_train, n_test, mask=None):
         if mask is None:
-            attn_mask = torch.cat((
-                torch.ones(n_train+n_test, n_train),
-                torch.zeros(n_train+n_test, n_test)
+            """
+            attention mask:
+                e.g. train - 4, test - 2
+                [
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 0, 0],
+                ]
+            """
+            return torch.cat((
+                torch.ones(n_train+n_test, n_train, dtype=torch.bool),
+                torch.zeros(n_train+n_test, n_test, dtype=torch.bool)
             ), dim=1) # (n_train+n_test, n_train+n_test)
-        else:
-            """
-            mask: (batch_size, n_train)
-            """
-            attn_mask = torch.cat((
-                mask,
-                torch.zeros(mask.shape[0], n_test, device=mask.device, dtype=mask.dtype)
-            ), dim=1).unsqueeze(1).repeat(1, n_train+n_test, 1)  # (batch_size, n_train+n_test, n_train+n_test)
-
-        if as_bias:
-            # each test point attends to both train and test data
-            # with an additive constant bias towards train data
-            return bias_scale * attn_mask.float()
-        return attn_mask.bool()
+        """
+        mask: (batch_size, n_train)
+        """
+        return torch.stack([
+            torch.cat((
+                m, torch.zeros(n_test, device=m.device)
+            )).unsqueeze(0).repeat(n_train+n_test, 1) for m in mask
+        ], dim=0) # (batch_size, n_train+n_test, n_train+n_test)
 
     @torch.no_grad()
     def predict_helper(self, x_train, y_train, x_test,

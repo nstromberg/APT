@@ -1,8 +1,7 @@
 from packaging import version
 from typing import Optional
 from collections import namedtuple
-from inspect import getargspec
-
+from inspect import getfullargspec as getargspec
 import numpy as np
 
 from sklearn.metrics import roc_auc_score

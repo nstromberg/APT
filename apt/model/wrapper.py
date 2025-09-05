@@ -43,7 +43,11 @@ class APTPredictor(APT):
         y_test: (test_size,)
         """
         x_train = torch.as_tensor(x_train)
-        y_train = torch.as_tensor(y_train)
+        if y_train is None:
+            # Set y_train to dummy label (zeros)
+            y_train = torch.zeros(x_train.shape[0])
+        else:
+            y_train = torch.as_tensor(y_train)
         if process_data:
             self.x_encoder = NumericEncoder().fit(x_train)
             x_train = self.x_encoder.transform(x_train)
