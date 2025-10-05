@@ -11,7 +11,7 @@ setup(
     author="Yulun Wu",
     author_email="yulun_wu@berkeley.edu",
     license="MIT",
-    packages=["apt"],
+    packages=setuptools.find_packages(),
     cmdclass=cmdclass,
     ext_modules=ext_modules
 )
