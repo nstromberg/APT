@@ -157,7 +157,7 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
 
         with torch.no_grad():
             emb = self.model.get_query_embedding(x_batch, y_batch).squeeze()
-        return emb.cpu().numpy()
+        return np.concatenate(emb.cpu().numpy(), axis=0)
 
     def _transform_test(self, x: torch.Tensor, y: torch.Tensor = None) -> np.ndarray:
         """
