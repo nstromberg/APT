@@ -3,23 +3,41 @@ import torch
 import numpy as np
 from apt.model import APT
 from sklearn.model_selection import StratifiedKFold  # Add this import
+import pathlib
+import os
 
 class APTEmbedder(TransformerMixin, BaseEstimator):
-    def __init__(self, model_path: str, device: str = None):
+    def __init__(self, device="cpu", model_name="model_epoch=200_classification_2025.01.13_21:18:53.pt",
+                 base_path=pathlib.Path(__file__).parent.parent.resolve(), model_dir="checkpoints",
+                 url="https://osf.io/download/684c9eb0fdbd7bc7fab689be/"):
         """
         Initialize the APTEmbedder.
 
         Parameters:
-        model_path : str
-            Path to the pre-trained model.
+        model_name : str
+            Name of the pre-trained model file.
         device : str, optional
             Device to run the model on. If None, it uses "cuda" if available, otherwise "cpu".
+        base_path : str, optional
+            Base path for the model directory.
+        model_dir : str, optional
+            Directory where the model is stored.
+        url : str, optional
+            URL to download the model if not found locally.
         """
         self.x_train = None
         self.y_train = None
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
+        model_path = os.path.join(base_path, model_dir, model_name)
         self.model_path = model_path
+        if not pathlib.Path(model_path).is_file():
+            print(f"Model not found at {model_path}. Downloading from {url}...")
+            import requests
+            r = requests.get(url, allow_redirects=True)
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            open(model_path, 'wb').write(r.content)
+
         state_dict, init_args = torch.load(self.model_path, map_location='cpu')
         self.model = APT(**init_args)
         self.model.load_state_dict(state_dict)
