@@ -156,8 +156,8 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
         y_batch = torch.stack(y_folds).float()       # (k_folds, n_steps - fold_size)
 
         with torch.no_grad():
-            emb = self.model.get_query_embedding(x_batch, y_batch).squeeze()
-        return np.concatenate(emb.cpu().numpy(), axis=0)
+            emb = torch.flatten(self.model.get_query_embedding(x_batch, y_batch), end_dim=-2)
+        return emb.cpu().numpy()
 
     def _transform_test(self, x: torch.Tensor, y: torch.Tensor = None) -> np.ndarray:
         """
@@ -197,7 +197,7 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
             Embeddings for the longitudinal data.
         """
         embeddings = []
-        embeddings.append(self._transform_train(x[:k], k_folds=k))
+        embeddings.append(self._transform_train(x[:k], k_folds=k))  # Initial embedding for first k points
         x_batch = []
         y_batch = []  # Initialize y_batch to collect dummy labels
         for i in range(k, x.shape[0]):
