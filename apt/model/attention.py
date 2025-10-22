@@ -144,6 +144,7 @@ class FullAttention(LinearAttention):
             q, k, v = map(lambda t: t.contiguous(), (q, k, v))
             # Check if there is a compatible device for flash attention
             config = self.cuda_config if q.is_cuda else self.cpu_config
+            print(q.shape, k.shape, v.shape)
 
             with torch.nn.attention.sdpa_kernel(config):
                 dropout_p = self.dropout if self.training else 0.0

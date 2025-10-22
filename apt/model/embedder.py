@@ -278,6 +278,7 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
             query = x[i].unsqueeze(0)
             x_sample = torch.cat((context, query), dim=0).unsqueeze(0)
             y_dummy = torch.zeros((1, context.shape[0]), device=self.device)
+            print(x_sample.shape)
 
             with torch.no_grad():
                 emb = self.model.get_query_embedding(x_sample, y_dummy)
