@@ -89,7 +89,7 @@ class APT(nn.Module):
         split = y_train.shape[1]
 
         x = self._emb_x(x) # (batch_size, data_size, d_model)
-        print(x.shape)
+        # print(x.shape)
         x_train, x_test = x[:, :split, ...], x[:, split:, ...] # (batch_size, n_train, d_model), (batch_size, n_test, d_model)
         y_train_emb = self._emb_y(y_train.to(x.dtype).unsqueeze(-1)) # (batch_size, n_train, d_model)
 
