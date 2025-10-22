@@ -69,13 +69,14 @@ class PatchEmbedding(nn.Module):
         """
         x: (batch_size, data_size, feature_size)
         """
-        B, L, F = x.size()
-        x = self._patchify(x.view(B * L, 1, F))
-        _, D, P = x.size()
-        x = x.view(B, L, D, P).transpose(-1, -2)  # (B, L, P, D)
-        x = x.reshape(B, L * P, D)                # flatten for transformer
+        _, l, f = x.size()
+        x = self._patchify(x.view(-1, 1, f))
+
+        _, d, p = x.size()
+        x = x.view(-1, l, d, p).transpose(-1, -2)
         x = self._emb(x)
-        x = self._ln(x.sum(1))
+
+        x = self._ln(x.sum(-2))
         return x
 
 
