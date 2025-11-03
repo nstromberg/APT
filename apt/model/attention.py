@@ -1,5 +1,7 @@
 import functools
 import os
+import warnings
+import logging
 
 import torch
 import torch.nn as nn
@@ -9,6 +11,12 @@ from .utils import set_device_config
 
 # throttle SDPA failure warnings so logs don't get flooded
 _sdpa_failure_warned = False
+# throttle SDPA internal user-warnings emitted by PyTorch (flash/flash-fallback messages)
+_sdpa_userwarning_emitted = False
+
+# logger for this module; respect APT_SDPA_VERBOSE=1 to allow full verbosity
+logger = logging.getLogger(__name__)
+
 
 
 class RotaryPositionalEncoding(nn.Module):
@@ -317,17 +325,34 @@ class FullAttention(LinearAttention):
                             q_h, k_h, v_h = q_s, k_s, v_s
 
                     try:
-                        with torch.nn.attention.sdpa_kernel(config):
-                            dropout_p = self.dropout if self.training else 0.0
-                            out_s = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=None if mask_s is None else None, dropout_p=dropout_p, scale=self.scale)
+                        # Capture any PyTorch warnings emitted by scaled_dot_product_attention
+                        verbose_sdpa = os.environ.get("APT_SDPA_VERBOSE", "0") == "1"
+                        with warnings.catch_warnings(record=True) as caught_w:
+                            warnings.simplefilter("always")
+                            with torch.nn.attention.sdpa_kernel(config):
+                                dropout_p = self.dropout if self.training else 0.0
+                                out_s = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=None if mask_s is None else None, dropout_p=dropout_p, scale=self.scale)
+
+                        # Log or throttle any captured warnings from the SDPA attempt
+                        global _sdpa_userwarning_emitted
+                        if caught_w:
+                            if verbose_sdpa:
+                                for w in caught_w:
+                                    logger.warning(f"SDPA warning: {w.message}")
+                            else:
+                                if not _sdpa_userwarning_emitted:
+                                    logger.warning(f"SDPA emitted warnings: {caught_w[0].message}; further similar messages will be suppressed. Set APT_SDPA_VERBOSE=1 to see all.")
+                                    _sdpa_userwarning_emitted = True
                     except Exception as _sdpa_exc:
                         # Fall back to math attention on SDPA failure. Throttle the
                         # warning so we don't log the same failure repeatedly.
-                        import warnings
                         global _sdpa_failure_warned
-                        if not _sdpa_failure_warned:
-                            warnings.warn(f"SDPA attempt failed ({_sdpa_exc}); falling back to math attention.", RuntimeWarning)
-                            _sdpa_failure_warned = True
+                        if os.environ.get("APT_SDPA_VERBOSE", "0") == "1":
+                            logger.warning(f"SDPA attempt failed ({_sdpa_exc}); falling back to math attention.")
+                        else:
+                            if not _sdpa_failure_warned:
+                                logger.warning(f"SDPA attempt failed ({_sdpa_exc}); falling back to math attention. Further SDPA failure messages will be suppressed. Set APT_SDPA_VERBOSE=1 to see all.")
+                                _sdpa_failure_warned = True
                         out = _math_attention(q, k, v, mask)
                         return out, kv_cache
 
@@ -339,9 +364,40 @@ class FullAttention(LinearAttention):
 
                     out = _unreshape_from_sdpa(out_s, q_meta)
                 else:
-                    with torch.nn.attention.sdpa_kernel(config):
-                        dropout_p = self.dropout if self.training else 0.0
-                        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout_p, scale=self.scale)
+                    # Capture warnings around the SDPA call and throttle logging
+                    try:
+                        verbose_sdpa = os.environ.get("APT_SDPA_VERBOSE", "0") == "1"
+                        with warnings.catch_warnings(record=True) as caught_w:
+                            warnings.simplefilter("always")
+                            with torch.nn.attention.sdpa_kernel(config):
+                                dropout_p = self.dropout if self.training else 0.0
+                                out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout_p, scale=self.scale)
+
+                        global _sdpa_userwarning_emitted
+                        if caught_w:
+                            if verbose_sdpa:
+                                for w in caught_w:
+                                    logger.warning(f"SDPA warning: {w.message}")
+                            else:
+                                if not _sdpa_userwarning_emitted:
+                                    logger.warning(f"SDPA emitted warnings: {caught_w[0].message}; further similar messages will be suppressed. Set APT_SDPA_VERBOSE=1 to see all.")
+                                    _sdpa_userwarning_emitted = True
+                    except Exception as exc:
+                        # Throttle the fallback message (only once unless verbose)
+                        global _sdpa_failure_warned
+                        try:
+                            qshape = tuple(q.shape)
+                            kshape = tuple(k.shape)
+                            vshape = tuple(v.shape)
+                        except Exception:
+                            qshape = kshape = vshape = None
+                        if os.environ.get("APT_SDPA_VERBOSE", "0") == "1":
+                            logger.warning(f"SDPA/flash attention path failed ({exc}); falling back to math attention. q.shape={qshape}, k.shape={kshape}, v.shape={vshape}")
+                        else:
+                            if not _sdpa_failure_warned:
+                                logger.warning(f"SDPA/flash attention path failed ({exc}); falling back to math attention. q.shape={qshape}, k.shape={kshape}, v.shape={vshape}. Further similar messages will be suppressed. Set APT_SDPA_VERBOSE=1 to see all.")
+                                _sdpa_failure_warned = True
+                        out = _math_attention(q, k, v, mask)
             except Exception as exc:
                 import warnings
                 try:
