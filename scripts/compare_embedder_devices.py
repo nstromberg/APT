@@ -96,6 +96,7 @@ def instrument_and_run_on_device(device: str):
 
     # simple synthetic data
     seq_len = 12
+    n_train = seq_len // 2
     d_patch = model.d_patch
     # single sequence, single batch
     X = np.random.randn(1, seq_len, d_patch).astype(np.float32)
@@ -104,30 +105,54 @@ def instrument_and_run_on_device(device: str):
     # Move to torch tensors on the target device
     x_tensor = torch.as_tensor(X, dtype=torch.float32, device=device_torch)
 
+    # If we successfully created an APTEmbedder, fit it on the synthetic
+    # training data so we can call its public `transform` API below.
+    if used_embedder and embedder is not None:
+        try:
+            # embedder.fit expects X in array-like shape (n_sequences, max_len, n_features)
+            embedder.fit(X, y)
+            xtrain_shape = getattr(embedder, 'x_train', None).shape if getattr(embedder, 'x_train', None) is not None else None
+            ytrain_shape = getattr(embedder, 'y_train', None).shape if getattr(embedder, 'y_train', None) is not None else None
+            log('Fitted APTEmbedder: x_train.shape={} y_train.shape={}', xtrain_shape, ytrain_shape)
+        except Exception as e:
+            log('Could not fit APTEmbedder on synthetic data: {}', e)
+            # fallback to using model internals
+            used_embedder = False
+
     results = {}
 
     # Mode: train
     try:
-        n_train = seq_len // 2
-        x_context = x_tensor[0, :n_train, :]
-        x_query = x_tensor[0, n_train:, :]
-        x_fold = torch.cat((x_context, x_query), dim=0).unsqueeze(0)  # (1, data_size, feat)
-        y_context = torch.as_tensor(y[:n_train], dtype=torch.long, device=device_torch).unsqueeze(0)
+        if used_embedder and embedder is not None:
+            # Use the embedder public API for train embeddings
+            try:
+                out_np = embedder.transform(X, mode='train', k_folds=2)
+                log('[train] embedder.transform output shape: {}', getattr(out_np, 'shape', np.shape(out_np)))
+                results['train'] = out_np
+            except Exception as e:
+                results['train'] = ('error', str(e), traceback.format_exc())
+                log('[train] embedder.transform ERROR: {}', e)
+        else:
+            n_train = seq_len // 2
+            x_context = x_tensor[0, :n_train, :]
+            x_query = x_tensor[0, n_train:, :]
+            x_fold = torch.cat((x_context, x_query), dim=0).unsqueeze(0)  # (1, data_size, feat)
+            y_context = torch.as_tensor(y[:n_train], dtype=torch.long, device=device_torch).unsqueeze(0)
 
-        log('\n[train] x_fold.shape: {}', tuple(x_fold.shape))
-        log('[train] y_context.shape: {}', tuple(y_context.shape))
+            log('\n[train] x_fold.shape: {}', tuple(x_fold.shape))
+            log('[train] y_context.shape: {}', tuple(y_context.shape))
 
-        # log after embedding layers
-        emb_x = model._emb_x(x_fold)
-        log('[train] _emb_x output shape: {}', tuple(emb_x.shape))
+            # log after embedding layers
+            emb_x = model._emb_x(x_fold)
+            log('[train] _emb_x output shape: {}', tuple(emb_x.shape))
 
-        y_emb = model._emb_y(y_context.to(emb_x.dtype).unsqueeze(-1))
-        log('[train] _emb_y output shape: {}', tuple(y_emb.shape))
+            y_emb = model._emb_y(y_context.to(emb_x.dtype).unsqueeze(-1))
+            log('[train] _emb_y output shape: {}', tuple(y_emb.shape))
 
-        with torch.no_grad():
-            out = model.get_query_embedding(x_fold, y_context)
-        log('[train] get_query_embedding output shape: {} dtype={} device={}', tuple(out.shape), out.dtype, out.device)
-        results['train'] = out.cpu().numpy()
+            with torch.no_grad():
+                out = model.get_query_embedding(x_fold, y_context)
+            log('[train] get_query_embedding output shape: {} dtype={} device={}', tuple(out.shape), out.dtype, out.device)
+            results['train'] = out.cpu().numpy()
     except Exception as e:
         results['train'] = ('error', str(e), traceback.format_exc())
         log('[train] ERROR: {}', e)
