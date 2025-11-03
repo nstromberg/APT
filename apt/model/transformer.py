@@ -24,6 +24,14 @@ class TransformerBlock(nn.Module):
         self._ln_ff = nn.LayerNorm(d_model, eps=norm_eps)
 
     def forward(self, x, mask=None):
+        # Diagnostic prints: if attention module has verbose turned on, print
+        # shapes that influence q/k creation so we can trace unexpected dims.
+        if getattr(self._attn, 'verbose', False):
+            try:
+                print(f"TransformerBlock.forward: input x.shape={tuple(x.shape)} mask.shape={None if mask is None else tuple(getattr(mask,'shape', ())) }")
+            except Exception:
+                pass
+
         x = x + self._attn(x, mask=mask)
         x = self._ln_attn(x)
         x = x + self._ff(x)
@@ -69,14 +77,40 @@ class PatchEmbedding(nn.Module):
         """
         x: (batch_size, data_size, feature_size)
         """
-        _, l, f = x.size()
-        x = self._patchify(x.view(-1, 1, f))
+        try:
+            b, l, f = x.size()
+        except Exception:
+            # fallback for unexpected shapes
+            shape = tuple(x.shape)
+            b = shape[0] if len(shape) > 0 else None
+            l = shape[1] if len(shape) > 1 else None
+            f = shape[2] if len(shape) > 2 else None
 
-        _, d, p = x.size()
-        x = x.view(-1, l, d, p).transpose(-1, -2)
-        x = self._emb(x)
+        # patchify operates on (batch*length, 1, features)
+        x_patch = self._patchify(x.view(-1, 1, f))
 
-        x = self._ln(x.sum(-2))
+        _, d, p = x_patch.size()
+
+        # Treat patches as the sequence axis for the transformer: (batch*seq_len, p, d)
+        x_patches_seq = x_patch.transpose(1, 2).contiguous()  # (batch*seq_len, p, d)
+
+        # Diagnostic prints: show shapes that will affect attention's perceived
+        # batch and sequence axes (this is where extra dims can appear).
+        if getattr(self._emb._attn, 'verbose', False) or getattr(self, 'verbose', False):
+            try:
+                print(f"PatchEmbedding.forward: input.shape={(b,l,f)} patchified.shape={tuple(x_patch.shape)} patches_seq.shape={tuple(x_patches_seq.shape)}")
+            except Exception:
+                pass
+
+        # Run transformer over patches for each original timestep (batch*seq_len as batch)
+        out_patches = self._emb(x_patches_seq)  # (batch*seq_len, p, d_model)
+
+        # Pool across the patch (sequence) dimension to get a single vector per timestep
+        pooled = out_patches.sum(dim=1)  # (batch*seq_len, d_model)
+
+        # reshape back to (batch, seq_len, d_model)
+        x = pooled.view(b, l, -1)
+        x = self._ln(x)
         return x
 
 

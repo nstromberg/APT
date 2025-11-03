@@ -64,6 +64,11 @@ class APT(nn.Module):
         split = y_train.shape[1]
 
         x = self._emb_x(x) # (batch_size, data_size, d_model)
+        if getattr(self, 'verbose', False):
+            try:
+                print(f"APT.forward: after emb_x x.shape={tuple(x.shape)} y_train.shape={tuple(y_train.shape)} mask_shape={None if mask is None else tuple(getattr(mask,'shape',()))}")
+            except Exception:
+                pass
         x_train, x_test = x[:, :split, ...], x[:, split:, ...] # (batch_size, n_train, d_model), (batch_size, n_test, d_model)
         y_train = self._emb_y(y_train.to(x.dtype).unsqueeze(-1)) # (batch_size, n_train, d_model)
 
@@ -89,7 +94,11 @@ class APT(nn.Module):
         split = y_train.shape[1]
 
         x = self._emb_x(x) # (batch_size, data_size, d_model)
-        # print(x.shape)
+        if getattr(self, 'verbose', False):
+            try:
+                print(f"APT.get_query_embedding: after emb_x x.shape={tuple(x.shape)} y_train.shape={tuple(y_train.shape)}")
+            except Exception:
+                pass
         x_train, x_test = x[:, :split, ...], x[:, split:, ...] # (batch_size, n_train, d_model), (batch_size, n_test, d_model)
         y_train_emb = self._emb_y(y_train.to(x.dtype).unsqueeze(-1)) # (batch_size, n_train, d_model)
 

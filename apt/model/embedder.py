@@ -55,14 +55,14 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
             if hasattr(self.model, 'verbose'):
                 setattr(self.model, 'verbose', self.verbose)
 
-            # Walk submodules and set verbose where available (e.g., attention blocks)
+            # Walk submodules and (best-effort) set a 'verbose' attribute so
+            # diagnostic prints in transformer/attention can be enabled.
             for m in self.model.modules():
-                if hasattr(m, 'verbose'):
-                    try:
-                        setattr(m, 'verbose', self.verbose)
-                    except Exception:
-                        # Best-effort: don't fail embedder init for modules that can't be set
-                        pass
+                try:
+                    setattr(m, 'verbose', self.verbose)
+                except Exception:
+                    # don't let diagnostics break model loading
+                    pass
         except Exception:
             # Ignore any errors while propagating verbose flags; this is purely diagnostic
             pass

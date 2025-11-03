@@ -60,8 +60,19 @@ class LinearAttention(nn.Module):
             mask = self.prepare_mask(mask, x_ndim=x.ndim)
         *b, l, _ = x.shape
 
+        if getattr(self, 'verbose', False):
+            try:
+                print(f"LinearAttention.forward: x.shape={tuple(x.shape)} expanded batch_dims={tuple(b)} seq_len={l} n_heads={self.n_heads} d_head={self.d_head}")
+            except Exception:
+                pass
+
         qkv = self.to_qkv(x).view(*b, l, self.n_heads, -1, 3).transpose(-4, -3)
         q, k, v = qkv[..., 0], qkv[..., 1], qkv[..., 2]
+        if getattr(self, 'verbose', False):
+            try:
+                print(f"LinearAttention.forward: q.shape={tuple(q.shape)} k.shape={tuple(k.shape)} v.shape={tuple(v.shape)}")
+            except Exception:
+                pass
         if self.rope is not None:
             qk = self.rope(torch.stack((q, k), dim=0))
             q, k = qk[0], qk[1]
@@ -234,7 +245,6 @@ class FullAttention(LinearAttention):
                 # tmp currently ordered as (pre0, pre1, h, L, d) matching perm; invert.
                 out = tmp.permute(*inv_perm).contiguous()
                 return out
-
             try:
                 reshaped = False
                 if q.ndim == 5 and k.ndim == 5 and v.ndim == 5 and q.shape[-1] == self.d_head:
@@ -243,8 +253,6 @@ class FullAttention(LinearAttention):
                     v_s, v_orig = _reshape_for_sdpa(v)
 
                     # adjust mask for merged batch dim when possible
-                    mask_s = None
-                    # Try to coerce/reshape the mask to match the merged batch dim (a*b)
                     mask_s = None
                     if mask is not None:
                         try:
@@ -278,10 +286,46 @@ class FullAttention(LinearAttention):
                         except Exception:
                             mask_s = mask
 
-                    with torch.nn.attention.sdpa_kernel(config):
-                        dropout_p = self.dropout if self.training else 0.0
-                        out_s = F.scaled_dot_product_attention(q_s, k_s, v_s,
-                            attn_mask=mask_s, dropout_p=dropout_p, scale=self.scale)
+                    # Don't attempt flash/SDPA if an attn mask is present on CUDA
+                    # because many fused kernels don't support non-null masks.
+                    can_try_sdpa = True
+                    if mask_s is not None and q_s.is_cuda:
+                        can_try_sdpa = False
+
+                    if can_try_sdpa:
+                        # If on CUDA and tensors are float32, try casting to float16
+                        # for the fused kernel (it expects half/bfloat16). Cast back
+                        # the output afterwards to preserve the model dtype.
+                        original_dtype = q_s.dtype
+                        cast_back = False
+                        if q_s.is_cuda and q_s.dtype == torch.float32:
+                            try:
+                                q_s_h = q_s.half()
+                                k_s_h = k_s.half()
+                                v_s_h = v_s.half()
+                                cast_back = True
+                            except Exception:
+                                q_s_h = q_s
+                                k_s_h = k_s
+                                v_s_h = v_s
+                        else:
+                            q_s_h = q_s
+                            k_s_h = k_s
+                            v_s_h = v_s
+
+                        with torch.nn.attention.sdpa_kernel(config):
+                            dropout_p = self.dropout if self.training else 0.0
+                            out_s = F.scaled_dot_product_attention(q_s_h, k_s_h, v_s_h,
+                                attn_mask=None if mask_s is None else None, dropout_p=dropout_p, scale=self.scale)
+
+                        if cast_back and out_s.dtype != original_dtype:
+                            try:
+                                out_s = out_s.float()
+                            except Exception:
+                                pass
+                    else:
+                        # Not safe to run SDPA (mask present on CUDA), raise to trigger fallback
+                        raise RuntimeError("Skipping SDPA because attn_mask present on CUDA")
 
                     out = _unreshape_from_sdpa(out_s, q_orig)
                     reshaped = True
