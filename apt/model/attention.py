@@ -7,6 +7,9 @@ import torch.nn.functional as F
 
 from .utils import set_device_config
 
+# throttle SDPA failure warnings so logs don't get flooded
+_sdpa_failure_warned = False
+
 
 class RotaryPositionalEncoding(nn.Module):
   def __init__(self, dim: int, base: int = 10_000):
@@ -145,6 +148,16 @@ class FullAttention(LinearAttention):
                 self.force_math = env_force.lower() in ("true", "1", "yes")
         else:
             self.force_math = bool(force_math)
+        # Optionally try casting q/k/v to float16 for SDPA attempt on CUDA.
+        # Controlled by env vars: APT_TRY_FP16_SDPA or APT_SDPA_FP16
+        env_try_fp16 = os.environ.get("APT_TRY_FP16_SDPA") or os.environ.get("APT_SDPA_FP16")
+        if env_try_fp16 is not None:
+            try:
+                self.try_fp16_sdpa = bool(int(env_try_fp16))
+            except Exception:
+                self.try_fp16_sdpa = str(env_try_fp16).lower() in ("true", "1", "yes")
+        else:
+            self.try_fp16_sdpa = False
 
     def prepare_mask(self, mask, x_ndim=3):
         """
@@ -290,10 +303,11 @@ class FullAttention(LinearAttention):
                     if mask_s is not None and q_s.is_cuda:
                         raise RuntimeError("Skipping SDPA because attn_mask present on CUDA")
 
-                    # Cast to half on CUDA if required by kernel
+                    # Optionally cast to float16 for the SDPA attempt on CUDA.
                     original_dtype = q_s.dtype
                     cast_back = False
-                    if q_s.is_cuda and q_s.dtype == torch.float32:
+                    q_h, k_h, v_h = q_s, k_s, v_s
+                    if q_s.is_cuda and getattr(self, 'try_fp16_sdpa', False):
                         try:
                             q_h = q_s.half()
                             k_h = k_s.half()
@@ -301,12 +315,21 @@ class FullAttention(LinearAttention):
                             cast_back = True
                         except Exception:
                             q_h, k_h, v_h = q_s, k_s, v_s
-                    else:
-                        q_h, k_h, v_h = q_s, k_s, v_s
 
-                    with torch.nn.attention.sdpa_kernel(config):
-                        dropout_p = self.dropout if self.training else 0.0
-                        out_s = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=None if mask_s is None else None, dropout_p=dropout_p, scale=self.scale)
+                    try:
+                        with torch.nn.attention.sdpa_kernel(config):
+                            dropout_p = self.dropout if self.training else 0.0
+                            out_s = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=None if mask_s is None else None, dropout_p=dropout_p, scale=self.scale)
+                    except Exception as _sdpa_exc:
+                        # Fall back to math attention on SDPA failure. Throttle the
+                        # warning so we don't log the same failure repeatedly.
+                        import warnings
+                        global _sdpa_failure_warned
+                        if not _sdpa_failure_warned:
+                            warnings.warn(f"SDPA attempt failed ({_sdpa_exc}); falling back to math attention.", RuntimeWarning)
+                            _sdpa_failure_warned = True
+                        out = _math_attention(q, k, v, mask)
+                        return out, kv_cache
 
                     if cast_back and out_s.dtype != original_dtype:
                         try:
