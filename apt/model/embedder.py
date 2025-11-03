@@ -10,7 +10,7 @@ import warnings
 class APTEmbedder(TransformerMixin, BaseEstimator):
     def __init__(self, device="cpu", model_name="model_epoch=200_classification_2025.01.13_21:18:53.pt",
                  base_path=pathlib.Path(__file__).parent.parent.resolve(), model_dir="checkpoints",
-                 url="https://osf.io/download/684c9eb0fdbd7bc7fab689be/"):
+                 url="https://osf.io/download/684c9eb0fdbd7bc7fab689be/", verbose: bool = False):
         """
         Initialize the APTEmbedder.
 
@@ -45,6 +45,12 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
         self.model.to(device)
         self.model.eval()
         self.device = device
+        # verbose tracing flag
+        self.verbose = bool(verbose)
+
+    def _vprint(self, *args, **kwargs):
+        if getattr(self, 'verbose', False):
+            print(*args, **kwargs)
 
     def fit(self, X: np.ndarray, y: np.ndarray = None) -> 'APTEmbedder':
         """
@@ -98,16 +104,20 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
         if (self.x_train is None or self.y_train is None) and mode=='test':
             raise ValueError("Call fit with training data before transform.")
 
+        self._vprint(f"transform called: mode={mode}, k_folds={k_folds}, k={k}, fixed_window={fixed_window}")
         X = torch.as_tensor(X).to(self.device)  # (n_sequences, max_len, n_features)
+        self._vprint("transform: after as_tensor -> dtype=", X.dtype, " device=", X.device, " shape=", tuple(X.shape))
         if X.ndim == 2:
             X = X.unsqueeze(0)
+        self._vprint("transform: after ensure batch dim -> shape=", tuple(X.shape))
 
         results = []
         max_steps = 0  # Track the maximum steps for padding
-        for seq in X:
+        for seq_idx, seq in enumerate(X):
             # Remove nan padding (assume nan in all features means padding)
             mask = ~torch.isnan(seq).all(dim=-1)
             seq_clean = seq[mask]
+            self._vprint(f"transform: seq[{seq_idx}] raw_shape={tuple(seq.shape)} mask_valid={int(mask.sum().item())} clean_shape={tuple(seq_clean.shape)}")
             if seq_clean.shape[0] == 0:
                 # If sequence is all padding, skip or fill with nan
                 results.append(np.full((1, self.model.d_model), np.nan))
@@ -158,6 +168,8 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
         if x.ndim == 3 and x.shape[0] == 1:
             x = x.squeeze(0)
 
+        self._vprint("_transform_train: input x shape=", tuple(x.shape))
+
         seq_len = x.shape[0]
         if seq_len < 2:
             return np.zeros((0, self.model.d_model), dtype=np.float32)
@@ -179,13 +191,15 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
             split_iter = list(kf.split(np.zeros(seq_len)))
 
         embeddings = []
-        for train_index, test_index in split_iter:
+        for fold_idx, (train_index, test_index) in enumerate(split_iter):
             x_context = x[train_index]
             x_query = x[test_index]
             x_fold = torch.cat((x_context, x_query), dim=0).unsqueeze(0)
             y_context = torch.as_tensor(y_np[train_index], device=self.device).unsqueeze(0)
+            self._vprint(f"_transform_train: fold={fold_idx} x_fold.shape={tuple(x_fold.shape)} y_context.shape={tuple(y_context.shape)}")
             with torch.no_grad():
                 fold_emb = self.model.get_query_embedding(x_fold, y_context)
+            self._vprint(f"_transform_train: fold={fold_idx} fold_emb.shape={tuple(fold_emb.shape)} device={fold_emb.device} dtype={fold_emb.dtype}")
             embeddings.append(fold_emb.squeeze(0).cpu().numpy())
 
         return np.concatenate(embeddings, axis=0) if embeddings else np.zeros((0, self.model.d_model), dtype=np.float32)
@@ -208,17 +222,20 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
         if x.ndim == 2:
             x = x.unsqueeze(0)
 
+        self._vprint("_transform_test: input x shape=", tuple(x.shape))
+
         train_x = self.x_train
         if train_x is None or self.y_train is None:
             raise ValueError("Embedder must be fitted before calling transform with mode='test'.")
 
         if train_x.shape[0] == 1 and x.shape[0] > 1:
             train_x = train_x.repeat(x.shape[0], 1, 1)
+            self._vprint("_transform_test: repeated train_x to match batch ->", tuple(train_x.shape))
         elif train_x.shape[0] != x.shape[0]:
             raise ValueError("Mismatch between stored training batch and provided batch size.")
 
+        # build batch and corresponding y
         batch_x = torch.cat([train_x, x.to(self.device)], dim=1)
-
         y_train = self.y_train
         if y_train.ndim == 1:
             y_train = y_train.unsqueeze(0)
@@ -227,8 +244,11 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
         elif y_train.shape[0] != x.shape[0]:
             raise ValueError("Mismatch between stored labels and provided batch size.")
 
+        self._vprint("_transform_test: batch_x.shape=", tuple(batch_x.shape), " y_train.shape=", tuple(y_train.shape))
+
         with torch.no_grad():
             emb = self.model.get_query_embedding(batch_x, y_train)
+        self._vprint("_transform_test: emb.shape=", tuple(emb.shape), " device=", emb.device, " dtype=", emb.dtype)
 
         emb_np = emb.cpu().numpy()
         return emb_np.squeeze(0) if emb_np.shape[0] == 1 else emb_np
@@ -278,10 +298,11 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
             query = x[i].unsqueeze(0)
             x_sample = torch.cat((context, query), dim=0).unsqueeze(0)
             y_dummy = torch.zeros((1, context.shape[0]), device=self.device)
-            # print(x_sample.shape)
+            self._vprint(f"_transform_longitudinal: i={i} start={start} context.shape={tuple(context.shape)} x_sample.shape={tuple(x_sample.shape)} y_dummy.shape={tuple(y_dummy.shape)}")
 
             with torch.no_grad():
                 emb = self.model.get_query_embedding(x_sample, y_dummy)
+            self._vprint("_transform_longitudinal: emb.shape=", tuple(emb.shape), " device=", emb.device, " dtype=", emb.dtype)
             embeddings.append(emb.squeeze(0).squeeze(0).cpu().numpy())
 
         return np.stack(embeddings, axis=0) if embeddings else np.zeros((0, self.model.d_model), dtype=np.float32)

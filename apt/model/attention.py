@@ -146,10 +146,32 @@ class FullAttention(LinearAttention):
             config = self.cuda_config if q.is_cuda else self.cpu_config
             # print(q.shape, k.shape, v.shape)
 
-            with torch.nn.attention.sdpa_kernel(config):
-                dropout_p = self.dropout if self.training else 0.0
-                out = F.scaled_dot_product_attention(q, k, v,
-                    attn_mask=mask, dropout_p=dropout_p, scale=self.scale)
+            try:
+                with torch.nn.attention.sdpa_kernel(config):
+                    dropout_p = self.dropout if self.training else 0.0
+                    out = F.scaled_dot_product_attention(q, k, v,
+                        attn_mask=mask, dropout_p=dropout_p, scale=self.scale)
+            except Exception as exc:
+                    # Some CUDA environments may raise different errors or warnings when
+                    # no compatible SDPA kernel exists. Fall back to the safe math-based
+                    # attention implementation and emit a warning with shapes to aid debugging.
+                    import warnings
+                    try:
+                        qshape = tuple(q.shape)
+                        kshape = tuple(k.shape)
+                        vshape = tuple(v.shape)
+                    except Exception:
+                        qshape = kshape = vshape = None
+                    warnings.warn(
+                        f"SDPA/flash attention path failed ({exc}); falling back to math attention. q.shape={qshape}, k.shape={kshape}, v.shape={vshape}",
+                        RuntimeWarning,
+                    )
+                    attn = torch.einsum(f"...ld, ...md -> ...lm", q, k)
+                    attn = attn * self.scale
+                    attn = attn.masked_fill(mask == 0, float('-inf'))
+                    attn = attn.softmax(dim=-1)
+                    attn = F.dropout(attn, p=self.dropout, training=self.training)
+                    out = torch.einsum(f"...lm, ...me -> ...le", attn, v)
         else:
             attn = torch.einsum(f"...ld, ...md -> ...lm", q, k)
             attn = attn * self.scale

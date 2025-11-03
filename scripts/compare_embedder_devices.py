@@ -61,7 +61,7 @@ def instrument_and_run_on_device(device: str):
     used_embedder = False
     if HAS_EMBEDDER:
         try:
-            embedder = APTEmbedder(device=device)
+            embedder = APTEmbedder(device=device, verbose=True)
             used_embedder = True
             log('Using APTEmbedder (loaded checkpoint).')
             # expose model instance
