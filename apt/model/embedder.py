@@ -265,7 +265,7 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
             window = None
         embeddings = []
 
-        for i in range(1, seq_len):
+        for i in range(0, seq_len):
             if fixed_window:
                 assert window is not None
                 start = max(0, i - window)
