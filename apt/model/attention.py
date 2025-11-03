@@ -399,13 +399,14 @@ class FullAttention(LinearAttention):
                                 _sdpa_failure_warned = True
                         out = _math_attention(q, k, v, mask)
             except Exception as exc:
-                import warnings
                 try:
                     qshape = tuple(q.shape)
                     kshape = tuple(k.shape)
                     vshape = tuple(v.shape)
                 except Exception:
                     qshape = kshape = vshape = None
+                # use module-level warnings (imported at top) rather than
+                # importing inside the function (which would make it a local)
                 warnings.warn(f"SDPA/flash attention path failed ({exc}); falling back to math attention. q.shape={qshape}, k.shape={kshape}, v.shape={vshape}", RuntimeWarning)
                 out = _math_attention(q, k, v, mask)
 
