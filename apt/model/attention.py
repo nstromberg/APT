@@ -6,6 +6,9 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import json
+import time
+from pathlib import Path
 
 from .utils import set_device_config
 
@@ -16,6 +19,67 @@ _sdpa_userwarning_emitted = False
 
 # logger for this module; respect APT_SDPA_VERBOSE=1 to allow full verbosity
 logger = logging.getLogger(__name__)
+
+
+# Small helper to optionally capture q/k/v and pre-softmax logits for debugging
+def _should_capture():
+    return os.environ.get("APT_CAPTURE_QKV", "0") == "1"
+
+
+def _capture_path():
+    p = os.environ.get("APT_CAPTURE_DIR", "./sdpa_capture")
+    path = Path(p)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return path
+
+
+def _maybe_capture(module_name: str, tensors: dict, max_elems: int = 64):
+    """Save small slices and simple stats for the given tensors.
+
+    tensors: dict of name -> torch.Tensor
+    Creates a single torch.save() file with a small sample and stats.
+    """
+    if not _should_capture():
+        return
+    try:
+        out = {"module": module_name, "time": time.time(), "pid": os.getpid(), "data": {}}
+        for k, t in tensors.items():
+            try:
+                if t is None:
+                    out["data"][k] = None
+                    continue
+                tt = t.detach().cpu()
+                flat = tt.reshape(-1)
+                n = min(flat.numel(), max_elems)
+                sample = flat[:n].clone()
+                stats = {
+                    "shape": tuple(tt.shape),
+                    "dtype": str(tt.dtype),
+                    "numel": int(tt.numel()),
+                    "min": float(flat.min()) if flat.numel() > 0 else None,
+                    "max": float(flat.max()) if flat.numel() > 0 else None,
+                    "mean": float(flat.float().mean()) if flat.numel() > 0 else None,
+                }
+                out["data"][k] = {"sample": sample, "stats": stats}
+            except Exception as e:
+                try:
+                    out["data"][k] = {"error": str(e)}
+                except Exception:
+                    out["data"][k] = None
+        fname = f"capture_{module_name}_{int(time.time()*1e6)}_{os.getpid()}.pt"
+        fpath = _capture_path() / fname
+        try:
+            torch.save(out, fpath)
+            if getattr(logger, 'debug', None):
+                logger.debug(f"Captured qkv to {fpath}")
+        except Exception:
+            # best-effort capture; do not raise
+            pass
+    except Exception:
+        pass
 
 
 
@@ -126,9 +190,23 @@ class LinearAttention(nn.Module):
         if mask is not None:
             k = (k * mask).masked_fill(mask == 0, float('-inf'))
 
+        # Optionally capture q/k/v for debugging (writes small samples to disk)
+        try:
+            if _should_capture():
+                _maybe_capture(f"{self.__class__.__name__}_pre_update", {'q': q, 'k': k, 'v': v})
+        except Exception:
+            pass
+
         k, v, kv_cache = self.update_kv(k, v, kv_cache=kv_cache)
 
         q = q * self.scale
+        # Capture q/k/v after scaling (before softmax) if requested
+        try:
+            if _should_capture():
+                _maybe_capture(f"{self.__class__.__name__}_pre_softmax", {'q': q, 'k': k, 'v': v})
+        except Exception:
+            pass
+
         q = q.softmax(dim=-1)
         q = F.dropout(q, p=self.dropout, training=self.training)
         k = k.softmax(dim=-2)
@@ -196,6 +274,12 @@ class FullAttention(LinearAttention):
         def _math_attention(q_, k_, v_, mask_):
             attn = torch.einsum("...ld, ...md -> ...lm", q_, k_)
             attn = attn * self.scale
+            # Optionally capture pre-softmax logits and q/k/v for debugging
+            try:
+                if _should_capture():
+                    _maybe_capture(f"{self.__class__.__name__}_math", {'q': q_, 'k': k_, 'v': v_, 'attn_logits': attn})
+            except Exception:
+                pass
             if mask_ is not None:
                 # ensure mask is a tensor on the correct device
                 if not torch.is_tensor(mask_):
@@ -282,6 +366,13 @@ class FullAttention(LinearAttention):
                     k_s, k_meta = _reshape_for_sdpa(k)
                     v_s, v_meta = _reshape_for_sdpa(v)
                     q_meta = q_meta or {}
+
+                    # Capture reshaped q/k/v that will be passed to SDPA
+                    try:
+                        if _should_capture():
+                            _maybe_capture(f"{self.__class__.__name__}_sdpa_reshaped", {'q_s': q_s, 'k_s': k_s, 'v_s': v_s, 'q_orig': q, 'k_orig': k, 'v_orig': v})
+                    except Exception:
+                        pass
 
                     # Try to reshape mask to merged batch if possible
                     mask_s = None
