@@ -153,14 +153,87 @@ class FullAttention(LinearAttention):
                 print(f"FullAttention.attend: attempting SDPA; q.shape={tuple(q.shape)}, k.shape={tuple(k.shape)}, v.shape={tuple(v.shape)}, mask.shape={None if mask is None else tuple(mask.shape)}")
 
             def _reshape_for_sdpa(tensor):
-                a, b, h, L, d = tensor.shape
-                # merge leading dims and move heads after seq_len: (a*b, L, h, d)
-                return tensor.reshape(a * b, h, L, d).transpose(1, 2).contiguous(), (a, b, h, L, d)
+                """
+                Robustly reshape a 5-D tensor (with two leading batch-like dims)
+                into the 4-D shape expected by the fused SDPA kernel:
 
-            def _unreshape_from_sdpa(tensor, orig_shape):
-                a, b, h, L, d = orig_shape
+                    input (a, b, h, L, d) -> output (a*b, L, h, d)
+
+                This function is defensive: it locates the head and head-dim
+                axes by matching sizes (self.n_heads and self.d_head),
+                permutes to a canonical ordering, then merges leading batch
+                dims. It returns (reshaped_tensor, metadata) where metadata
+                contains information required to un-reshape the output.
+                """
+                if tensor.ndim != 5:
+                    return tensor, None
+
+                shape = tuple(tensor.shape)
+                # find axis indices for head count and head dim
+                try:
+                    h_idx = next(i for i, s in enumerate(shape) if s == self.n_heads)
+                    d_idx = next(i for i, s in enumerate(shape) if s == self.d_head)
+                except StopIteration:
+                    # Could not identify expected axes; bail out
+                    raise RuntimeError(f"Cannot identify head ({self.n_heads}) or head_dim ({self.d_head}) axes in tensor shape {shape}")
+
+                # Remaining axes are pre-batch dims and the sequence axis.
+                others = [i for i in range(5) if i not in (h_idx, d_idx)]
+                # Heuristic: choose the sequence axis as the largest remaining dim
+                seq_idx = max(others, key=lambda i: shape[i])
+                pre_batch = [i for i in others if i != seq_idx]
+
+                # Build permutation to (pre_batch[0], pre_batch[1], h_idx, seq_idx, d_idx)
+                if len(pre_batch) == 1:
+                    perm = (pre_batch[0], h_idx, seq_idx, d_idx)
+                    # inject a singleton so we always have two pre-batch dims when viewing
+                    t_perm = tensor.permute(*perm).contiguous().unsqueeze(1)
+                    a = shape[pre_batch[0]]
+                    b = 1
+                else:
+                    perm = (pre_batch[0], pre_batch[1], h_idx, seq_idx, d_idx)
+                    t_perm = tensor.permute(*perm).contiguous()
+                    a = shape[pre_batch[0]]
+                    b = shape[pre_batch[1]]
+
+                # now t_perm has shape (a, b, h, L, d)
+                # merge leading batch dims and reorder to (a*b, L, h, d)
+                a_times_b = a * b
+                # view/reshape then transpose heads and seq dims
+                t_view = t_perm.view(a_times_b, self.n_heads, t_perm.shape[-2], self.d_head)
+                t_out = t_view.transpose(1, 2).contiguous()  # (a*b, L, h, d)
+
+                metadata = {
+                    'orig_shape': shape,
+                    'perm': perm,
+                    'a': a,
+                    'b': b,
+                    'seq_dim_size': t_perm.shape[-2],
+                }
+                return t_out, metadata
+
+            def _unreshape_from_sdpa(tensor, metadata):
+                """Reverse the operation performed by _reshape_for_sdpa."""
+                if metadata is None:
+                    return tensor
+                a = metadata['a']
+                b = metadata['b']
+                perm = metadata['perm']
+                seq = metadata['seq_dim_size']
+
+                # tensor: (a*b, L, h, d)
                 tmp = tensor.transpose(1, 2).contiguous()  # (a*b, h, L, d)
-                return tmp.view(a, b, h, L, d)
+                # view back to (a, b, h, L, d)
+                tmp = tmp.view(a, b, self.n_heads, seq, self.d_head)
+
+                # Compute inverse permute
+                inv_perm = [0] * len(perm)
+                for i, p in enumerate(perm):
+                    inv_perm[p] = i
+
+                # tmp currently ordered as (pre0, pre1, h, L, d) matching perm; invert.
+                out = tmp.permute(*inv_perm).contiguous()
+                return out
 
             try:
                 reshaped = False
@@ -171,12 +244,38 @@ class FullAttention(LinearAttention):
 
                     # adjust mask for merged batch dim when possible
                     mask_s = None
-                    if mask is not None and torch.is_tensor(mask):
-                        if mask.ndim == 4 and mask.shape[0] == q_orig[0] and mask.shape[1] == q_orig[1]:
-                            mask_s = mask.reshape(q_orig[0] * q_orig[1], mask.shape[2], mask.shape[3])
-                        elif mask.ndim == 3 and mask.shape[0] == q_orig[0] * q_orig[1]:
-                            mask_s = mask
-                        else:
+                    # Try to coerce/reshape the mask to match the merged batch dim (a*b)
+                    mask_s = None
+                    if mask is not None:
+                        try:
+                            mask_t = mask
+                            if not torch.is_tensor(mask_t):
+                                mask_t = torch.as_tensor(mask_t, device=q.device)
+                            mask_t = mask_t.bool()
+
+                            # mask_t may have shape (..., seq, seq) or include pre-batch dims
+                            q_meta = q_orig or {}
+                            a_q = q_meta.get('a', 1)
+                            b_q = q_meta.get('b', 1)
+                            if mask_t.ndim == 5 and mask_t.shape[0] == a_q and mask_t.shape[1] == b_q:
+                                mask_s = mask_t.reshape(a_q * b_q, mask_t.shape[-2], mask_t.shape[-1])
+                            elif mask_t.ndim == 4 and mask_t.shape[0] == a_q * b_q:
+                                mask_s = mask_t
+                            elif mask_t.ndim == 3 and mask_t.shape[0] == a_q * b_q:
+                                mask_s = mask_t
+                            else:
+                                # Try permuting mask according to the permutation we used for q/k/v
+                                try:
+                                    perm_q = q_meta.get('perm', None)
+                                    if perm_q is not None:
+                                        mask_perm = mask_t.permute(*perm_q)
+                                        mask_s = mask_perm.reshape(a_q * b_q, mask_perm.shape[-2], mask_perm.shape[-1])
+                                    else:
+                                        mask_s = mask_t
+                                except Exception:
+                                    # Give up and pass the original mask through; SDPA may still reject it
+                                    mask_s = mask_t
+                        except Exception:
                             mask_s = mask
 
                     with torch.nn.attention.sdpa_kernel(config):
