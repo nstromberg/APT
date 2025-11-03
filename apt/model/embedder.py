@@ -48,6 +48,25 @@ class APTEmbedder(TransformerMixin, BaseEstimator):
         # verbose tracing flag
         self.verbose = bool(verbose)
 
+        # Propagate verbose flag into the loaded model and any attention modules so
+        # they can emit shape/debug information when requested by the user.
+        try:
+            # Set on top-level model if supported
+            if hasattr(self.model, 'verbose'):
+                setattr(self.model, 'verbose', self.verbose)
+
+            # Walk submodules and set verbose where available (e.g., attention blocks)
+            for m in self.model.modules():
+                if hasattr(m, 'verbose'):
+                    try:
+                        setattr(m, 'verbose', self.verbose)
+                    except Exception:
+                        # Best-effort: don't fail embedder init for modules that can't be set
+                        pass
+        except Exception:
+            # Ignore any errors while propagating verbose flags; this is purely diagnostic
+            pass
+
     def _vprint(self, *args, **kwargs):
         if getattr(self, 'verbose', False):
             print(*args, **kwargs)

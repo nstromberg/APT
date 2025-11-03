@@ -146,32 +146,88 @@ class FullAttention(LinearAttention):
             config = self.cuda_config if q.is_cuda else self.cpu_config
             # print(q.shape, k.shape, v.shape)
 
+            # Try SDPA/flash attention; if q/k/v are 5-D (extra leading dims)
+            # reshape to 4-D (batch, seq_len, num_heads, head_dim) before
+            # calling the fused kernel, then reshape the output back.
+            if getattr(self, 'verbose', False):
+                print(f"FullAttention.attend: attempting SDPA; q.shape={tuple(q.shape)}, k.shape={tuple(k.shape)}, v.shape={tuple(v.shape)}, mask.shape={None if mask is None else tuple(mask.shape)}")
+
+            def _reshape_for_sdpa(tensor):
+                a, b, h, L, d = tensor.shape
+                # merge leading dims and move heads after seq_len: (a*b, L, h, d)
+                return tensor.reshape(a * b, h, L, d).transpose(1, 2).contiguous(), (a, b, h, L, d)
+
+            def _unreshape_from_sdpa(tensor, orig_shape):
+                a, b, h, L, d = orig_shape
+                tmp = tensor.transpose(1, 2).contiguous()  # (a*b, h, L, d)
+                return tmp.view(a, b, h, L, d)
+
             try:
-                with torch.nn.attention.sdpa_kernel(config):
-                    dropout_p = self.dropout if self.training else 0.0
-                    out = F.scaled_dot_product_attention(q, k, v,
-                        attn_mask=mask, dropout_p=dropout_p, scale=self.scale)
+                reshaped = False
+                if q.ndim == 5 and k.ndim == 5 and v.ndim == 5 and q.shape[-1] == self.d_head:
+                    q_s, q_orig = _reshape_for_sdpa(q)
+                    k_s, k_orig = _reshape_for_sdpa(k)
+                    v_s, v_orig = _reshape_for_sdpa(v)
+
+                    # adjust mask for merged batch dim when possible
+                    mask_s = None
+                    if mask is not None and torch.is_tensor(mask):
+                        if mask.ndim == 4 and mask.shape[0] == q_orig[0] and mask.shape[1] == q_orig[1]:
+                            mask_s = mask.reshape(q_orig[0] * q_orig[1], mask.shape[2], mask.shape[3])
+                        elif mask.ndim == 3 and mask.shape[0] == q_orig[0] * q_orig[1]:
+                            mask_s = mask
+                        else:
+                            mask_s = mask
+
+                    with torch.nn.attention.sdpa_kernel(config):
+                        dropout_p = self.dropout if self.training else 0.0
+                        out_s = F.scaled_dot_product_attention(q_s, k_s, v_s,
+                            attn_mask=mask_s, dropout_p=dropout_p, scale=self.scale)
+
+                    out = _unreshape_from_sdpa(out_s, q_orig)
+                    reshaped = True
+                else:
+                    with torch.nn.attention.sdpa_kernel(config):
+                        dropout_p = self.dropout if self.training else 0.0
+                        out = F.scaled_dot_product_attention(q, k, v,
+                            attn_mask=mask, dropout_p=dropout_p, scale=self.scale)
             except Exception as exc:
-                    # Some CUDA environments may raise different errors or warnings when
-                    # no compatible SDPA kernel exists. Fall back to the safe math-based
-                    # attention implementation and emit a warning with shapes to aid debugging.
-                    import warnings
-                    try:
-                        qshape = tuple(q.shape)
-                        kshape = tuple(k.shape)
-                        vshape = tuple(v.shape)
-                    except Exception:
-                        qshape = kshape = vshape = None
-                    warnings.warn(
-                        f"SDPA/flash attention path failed ({exc}); falling back to math attention. q.shape={qshape}, k.shape={kshape}, v.shape={vshape}",
-                        RuntimeWarning,
-                    )
-                    attn = torch.einsum(f"...ld, ...md -> ...lm", q, k)
-                    attn = attn * self.scale
-                    attn = attn.masked_fill(mask == 0, float('-inf'))
-                    attn = attn.softmax(dim=-1)
-                    attn = F.dropout(attn, p=self.dropout, training=self.training)
-                    out = torch.einsum(f"...lm, ...me -> ...le", attn, v)
+                # Some CUDA environments may raise different errors or warnings when
+                # no compatible SDPA kernel exists. Fall back to the safe math-based
+                # attention implementation and emit a warning with shapes to aid debugging.
+                import warnings
+                try:
+                    qshape = tuple(q.shape)
+                    kshape = tuple(k.shape)
+                    vshape = tuple(v.shape)
+                except Exception:
+                    qshape = kshape = vshape = None
+                warnings.warn(
+                    f"SDPA/flash attention path failed ({exc}); falling back to math attention. q.shape={qshape}, k.shape={kshape}, v.shape={vshape}",
+                    RuntimeWarning,
+                )
+                attn = torch.einsum(f"...ld, ...md -> ...lm", q, k)
+                attn = attn * self.scale
+                # ensure mask is a tensor on the correct device and dtype
+                if mask is not None:
+                    if not torch.is_tensor(mask):
+                        try:
+                            mask_t = torch.as_tensor(mask, device=attn.device)
+                        except Exception:
+                            mask_t = None
+                    else:
+                        mask_t = mask.to(attn.device)
+                    if mask_t is not None:
+                        # convert to boolean mask and broadcast if needed
+                        mask_bool = mask_t.bool()
+                        try:
+                            attn = attn.masked_fill(~mask_bool, float('-inf'))
+                        except Exception:
+                            # fallback: try comparison-style mask
+                            attn = attn.masked_fill((mask_t == 0), float('-inf'))
+                attn = attn.softmax(dim=-1)
+                attn = F.dropout(attn, p=self.dropout, training=self.training)
+                out = torch.einsum(f"...lm, ...me -> ...le", attn, v)
         else:
             attn = torch.einsum(f"...ld, ...md -> ...lm", q, k)
             attn = attn * self.scale
