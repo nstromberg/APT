@@ -337,7 +337,6 @@ class FullAttention(LinearAttention):
                                 out_s = F.scaled_dot_product_attention(q_h, k_h, v_h, attn_mask=None if mask_s is None else None, dropout_p=dropout_p, scale=self.scale)
 
                         # Log or throttle any captured warnings from the SDPA attempt
-                        global _sdpa_userwarning_emitted
                         if caught_w:
                             if verbose_sdpa:
                                 for w in caught_w:
@@ -349,7 +348,6 @@ class FullAttention(LinearAttention):
                     except Exception as _sdpa_exc:
                         # Fall back to math attention on SDPA failure. Throttle the
                         # warning so we don't log the same failure repeatedly.
-                        global _sdpa_failure_warned
                         if os.environ.get("APT_SDPA_VERBOSE", "0") == "1":
                             logger.warning(f"SDPA attempt failed ({_sdpa_exc}); falling back to math attention.")
                         else:
@@ -376,7 +374,7 @@ class FullAttention(LinearAttention):
                                 dropout_p = self.dropout if self.training else 0.0
                                 out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout_p, scale=self.scale)
 
-                        global _sdpa_userwarning_emitted
+                        # (throttle handled by module-level flags declared above)
                         if caught_w:
                             if verbose_sdpa:
                                 for w in caught_w:
@@ -387,7 +385,6 @@ class FullAttention(LinearAttention):
                                     _sdpa_userwarning_emitted = True
                     except Exception as exc:
                         # Throttle the fallback message (only once unless verbose)
-                        global _sdpa_failure_warned
                         try:
                             qshape = tuple(q.shape)
                             kshape = tuple(k.shape)
