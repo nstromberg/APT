@@ -16,14 +16,32 @@ import numpy as np
 import torch
 import pprint
 
-from apt.model import APT
+# Prefer a relative import when the script is executed as a module (python -m),
+# otherwise fall back to inserting the repo root on sys.path so we import the
+# local `apt` package instead of any installed distribution.
+import pathlib
 
 try:
-    from apt.model.embedder import APTEmbedder
-    HAS_EMBEDDER = True
+    # when run via `python -m scripts.compare_embedder_devices` __package__ is set
+    if __package__:
+        from .apt.model import APT  # type: ignore
+        from .apt.model.embedder import APTEmbedder  # type: ignore
+        HAS_EMBEDDER = True
+    else:
+        raise ImportError
 except Exception:
-    APTEmbedder = None
-    HAS_EMBEDDER = False
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from apt.model import APT
+
+    try:
+        from apt.model.embedder import APTEmbedder
+        HAS_EMBEDDER = True
+    except Exception:
+        APTEmbedder = None
+        HAS_EMBEDDER = False
 
 
 def build_fresh_model(device: str, small_config: dict | None = None) -> APT:
