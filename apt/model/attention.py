@@ -183,6 +183,9 @@ class FullAttention(LinearAttention):
         This implementation supports forcing the math path via the
         `APT_FORCE_MATH_ATTENTION` env var or the `force_math` constructor flag.
         """
+        # ensure module-level throttle flags are treated as globals
+        global _sdpa_failure_warned, _sdpa_userwarning_emitted
+
         # update kv with memory and caches
         k, v, kv_cache = self.update_kv(k, v, kv_cache=kv_cache)
 
