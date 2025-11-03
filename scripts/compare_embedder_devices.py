@@ -17,6 +17,7 @@ import torch
 import pprint
 import os
 import random
+import argparse
 
 # Prefer a relative import when the script is executed as a module (python -m),
 # otherwise fall back to inserting the repo root on sys.path so we import the
@@ -94,7 +95,7 @@ def instrument_and_run_on_device(device: str):
     model = None
     embedder = None
     used_embedder = False
-    if HAS_EMBEDDER:
+    if HAS_EMBEDDER and APTEmbedder is not None:
         try:
             embedder = APTEmbedder(device=device, verbose=True)
             used_embedder = True
@@ -137,8 +138,12 @@ def instrument_and_run_on_device(device: str):
         try:
             # embedder.fit expects X in array-like shape (n_sequences, max_len, n_features)
             embedder.fit(X, y)
-            xtrain_shape = getattr(embedder, 'x_train', None).shape if getattr(embedder, 'x_train', None) is not None else None
-            ytrain_shape = getattr(embedder, 'y_train', None).shape if getattr(embedder, 'y_train', None) is not None else None
+            xtrain_shape = None
+            ytrain_shape = None
+            if getattr(embedder, 'x_train', None) is not None:
+                xtrain_shape = getattr(embedder, 'x_train').shape
+            if getattr(embedder, 'y_train', None) is not None:
+                ytrain_shape = getattr(embedder, 'y_train').shape
             log('Fitted APTEmbedder: x_train.shape={} y_train.shape={}', xtrain_shape, ytrain_shape)
         except Exception as e:
             log('Could not fit APTEmbedder on synthetic data: {}', e)
@@ -238,6 +243,178 @@ def instrument_and_run_on_device(device: str):
     return results
 
 
+def _extract_init_args_from_model(model: APT) -> dict:
+    """Reconstruct init args from an instantiated APT model instance."""
+    return {
+        "n_blocks": getattr(model, "n_blocks"),
+        "d_patch": getattr(model, "d_patch"),
+        "d_model": getattr(model, "d_model"),
+        "d_ff": getattr(model, "d_ff"),
+        "n_heads": getattr(model, "n_heads"),
+        "dropout": getattr(model, "dropout"),
+        "activation": getattr(model, "activation"),
+        "norm_eps": getattr(model, "norm_eps"),
+        "classification": getattr(model, "classification"),
+    }
+
+
+def _tensor_from_out(out):
+    """Normalize module forward output to a single Tensor for comparison.
+
+    If module returns a tuple like (out, kv_cache), pick the primary tensor.
+    """
+    if isinstance(out, torch.Tensor):
+        return out.detach()
+    if isinstance(out, (list, tuple)) and len(out) > 0:
+        for x in out:
+            if isinstance(x, torch.Tensor):
+                return x.detach()
+    # fallback: try to convert whatever it is to a tensor
+    try:
+        return torch.as_tensor(out).detach()
+    except Exception:
+        return None
+
+
+def per_layer_compare(tol: float = 1e-4, save_divergent: bool = False):
+    """Run the same inputs through CPU and CUDA models and compare intermediate activations.
+
+    Registers forward hooks on PatchEmbedding, TransformerBlock, FullAttention and
+    LinearAttention modules and reports per-module max abs diffs.
+    """
+    if not torch.cuda.is_available():
+        print('CUDA not available; cannot run per-layer comparator.')
+        return
+
+    # Build or obtain a reference model to extract state_dict and init args
+    try:
+        if HAS_EMBEDDER and APTEmbedder is not None:
+            ref_embedder = APTEmbedder(device='cpu', verbose=False)
+            ref_model = ref_embedder.model
+        else:
+            ref_model = build_fresh_model('cpu')
+    except Exception:
+        ref_model = build_fresh_model('cpu')
+
+    state = ref_model.state_dict()
+    init_args = _extract_init_args_from_model(ref_model)
+
+    # Build CPU and CUDA models from the same state
+    cpu_model = APT(**init_args)
+    cpu_model.load_state_dict(state)
+    cpu_model.to('cpu')
+    cpu_model.eval()
+
+    cuda_model = APT(**init_args)
+    cuda_model.load_state_dict(state)
+    cuda_model.to('cuda')
+    cuda_model.eval()
+
+    # Create simple synthetic inputs matching other runs
+    seq_len = 12
+    n_train = seq_len // 2
+    d_patch = cpu_model.d_patch
+    X = np.random.randn(1, seq_len, d_patch).astype(np.float32)
+    y = np.random.randint(0, 2, size=(seq_len,), dtype=np.int64)
+
+    x_tensor_cpu = torch.as_tensor(X, dtype=torch.float32, device='cpu')
+    x_tensor_cuda = torch.as_tensor(X, dtype=torch.float32, device='cuda')
+
+    # Build batch inputs used in instrumented runs
+    train_x_cpu = x_tensor_cpu[:, :n_train, :]
+    test_x_cpu = x_tensor_cpu
+    batch_x_cpu = torch.cat([train_x_cpu, test_x_cpu], dim=1)
+    y_train_cpu = torch.as_tensor(y[:n_train], dtype=torch.long, device='cpu').unsqueeze(0)
+
+    train_x_cuda = x_tensor_cuda[:, :n_train, :]
+    test_x_cuda = x_tensor_cuda
+    batch_x_cuda = torch.cat([train_x_cuda, test_x_cuda], dim=1)
+    y_train_cuda = torch.as_tensor(y[:n_train], dtype=torch.long, device='cuda').unsqueeze(0)
+
+    # Select modules to hook (by class name)
+    target_names = set(['PatchEmbedding', 'TransformerBlock', 'FullAttention', 'LinearAttention', 'MixtureBlock'])
+
+    cpu_acts = {}
+    cuda_acts = {}
+
+    hooks = []
+
+    def register_hooks(model, storage, device_name):
+        for name, mod in model.named_modules():
+            if mod.__class__.__name__ in target_names:
+                # create local var to capture name
+                def make_hook(n):
+                    def hook(module, inp, out):
+                        t = _tensor_from_out(out)
+                        if t is None:
+                            storage[n] = None
+                            return
+                        # move to cpu for uniform comparison
+                        try:
+                            storage[n] = t.detach().cpu().clone()
+                        except Exception:
+                            try:
+                                storage[n] = t.detach().cpu()
+                            except Exception:
+                                storage[n] = None
+                    return hook
+                h = mod.register_forward_hook(make_hook(name))
+                hooks.append(h)
+
+    # register hooks
+    register_hooks(cpu_model, cpu_acts, 'cpu')
+    register_hooks(cuda_model, cuda_acts, 'cuda')
+
+    # Run forward passes
+    with torch.no_grad():
+        try:
+            _ = cpu_model.get_query_embedding(batch_x_cpu, y_train_cpu)
+        except Exception as e:
+            print('CPU model forward failed during per-layer run:', e)
+        try:
+            _ = cuda_model.get_query_embedding(batch_x_cuda, y_train_cuda)
+        except Exception as e:
+            print('CUDA model forward failed during per-layer run:', e)
+
+    # remove hooks
+    for h in hooks:
+        try:
+            h.remove()
+        except Exception:
+            pass
+
+    # Compare activations in the order encountered in cpu model
+    print('\n=== Per-layer comparison (max abs diff) ===')
+    divergences = {}
+    for name in cpu_acts.keys():
+        a = cpu_acts.get(name)
+        b = cuda_acts.get(name)
+        if a is None or b is None:
+            print(f"{name}: one side missing activation (cpu={'yes' if a is not None else 'no'}, cuda={'yes' if b is not None else 'no'})")
+            continue
+        if a.shape != b.cpu().shape:
+            print(f"{name}: shape mismatch cpu={tuple(a.shape)} cuda={tuple(b.cpu().shape)}")
+            divergences[name] = ('shape', tuple(a.shape), tuple(b.cpu().shape))
+            continue
+        diff = torch.max(torch.abs(a - b.cpu())).item()
+        print(f"{name}: max_abs_diff={diff}")
+        if diff > tol:
+            divergences[name] = ('value', diff)
+            if save_divergent:
+                fname = f"divergence_{name.replace('/', '_')}.pt"
+                torch.save({'cpu': a, 'cuda': b.cpu()}, fname)
+                print(f" Saved divergent tensors to {fname}")
+
+    if divergences:
+        print('\nFirst divergences found:')
+        for k, v in divergences.items():
+            print(k, v)
+    else:
+        print('\nNo per-layer divergences above tolerance found.')
+
+
+
+
 def compare_results(cpu_res, cuda_res):
     print('\n\n=== Summary comparison CPU vs CUDA ===')
     for mode in ('train', 'test', 'longitudinal'):
@@ -279,5 +456,18 @@ if __name__ == '__main__':
         cuda_res = instrument_and_run_on_device('cuda')
 
     compare_results(cpu_res, cuda_res)
+
+    # Optionally run the per-layer comparator when requested via environment.
+    # Set APT_PER_LAYER=1 to enable. Optional extras:
+    #   APT_PER_LAYER_TOL to set tolerance (float), default 1e-4
+    #   APT_PER_LAYER_SAVE=1 to save divergent tensors to disk
+    if os.environ.get('APT_PER_LAYER') in ('1', 'true', 'True'):
+        try:
+            tol = float(os.environ.get('APT_PER_LAYER_TOL', '1e-4'))
+        except Exception:
+            tol = 1e-4
+        save_div = os.environ.get('APT_PER_LAYER_SAVE') in ('1', 'true', 'True')
+        print('\nRunning per-layer comparator (tol={} save_divergent={})'.format(tol, save_div))
+        per_layer_compare(tol=tol, save_divergent=save_div)
 
     print('\nDone. If shapes or devices differ unexpectedly, inspect printed logs above for the first mismatch.')
