@@ -15,6 +15,8 @@ import traceback
 import numpy as np
 import torch
 import pprint
+import os
+import random
 
 # Prefer a relative import when the script is executed as a module (python -m),
 # otherwise fall back to inserting the repo root on sys.path so we import the
@@ -73,6 +75,21 @@ def instrument_and_run_on_device(device: str):
     log('\n=== Running on device: {} ===', device)
     device_torch = torch.device(device)
 
+    # Ensure deterministic runs and consistent attention path for parity testing.
+    # Force the math (non-fused) attention path for both CPU and CUDA so we
+    # compare identical algorithms. Also set deterministic flags and seeds.
+    os.environ.setdefault('APT_FORCE_MATH_ATTENTION', '1')
+    # Deterministic behavior for reproducibility
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
+    torch.manual_seed(0)
+    np.random.seed(0)
+    random.seed(0)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     # try to get an embedder; if not possible create fresh model
     model = None
     embedder = None
@@ -86,6 +103,15 @@ def instrument_and_run_on_device(device: str):
             model = embedder.model
             model.to(device_torch)
             model.eval()
+            # report attention math forcing for debugging
+            fm_total = 0
+            fm_true = 0
+            for m in model.modules():
+                if hasattr(m, 'force_math'):
+                    fm_total += 1
+                    if getattr(m, 'force_math'):
+                        fm_true += 1
+            log('Model attention modules with force_math: {}/{}', fm_true, fm_total)
         except Exception as e:
             log('Could not instantiate APTEmbedder: {}', e)
             log('Falling back to a fresh APT with small config for testing.')
